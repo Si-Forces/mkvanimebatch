@@ -4,14 +4,17 @@ Status: accepted on 2026-11-16 for #220, #222, #226, #227, and #228.
 
 The home-path guard prevents accidental publication of the checking environment's home identities.
 Its existing identity, spelling, matching, and redaction rules apply across file contents,
-filenames, commit and annotated tag messages, published ref names, and prepared PR bodies.
+added and renamed filenames, commit and annotated tag headers and messages, published ref names,
+and prepared PR bodies.
 
 Git hooks and explicit jj gates cover local Git publication. Agent-driven PR creation and body
 updates must use a repository-owned command that checks the exact prepared PR body before invoking
 gh; a read or scan failure stops publication. This adds a required publishing step in exchange for
 checking descriptions before GitHub receives them. A check after publication cannot provide that
 guarantee. Direct gh commands, browser edits, other API clients, and local gate bypasses remain
-documented bypasses.
+documented bypasses. Under `jj gpush`, `jj git push` chooses the tag object to send at push
+time, leaving a brief concurrent-replacement race between the gate's final tag-object
+re-check and the push itself.
 
 New and updated refs must target commits, directly or through nested annotated tags. Guarded
 publication refuses blob and tree targets before either SKIP setting; deletions remain allowed.

@@ -5,6 +5,7 @@
 # Usage:
 #   scripts/jj-gate.sh check              fast gates over trunk()..@ (the pre-commit + commit-msg checks, home-path included)
 #   scripts/jj-gate.sh push [push args]   home-path check + review ledger + test suites, then `jj git push [push args]` with no new snapshot
+#   scripts/jj-gate.sh --decode-name <raw>  test-only entry point for decode_jj_name
 #
 # jj has no index, so "what is being committed" is the working-copy commit @. Every jj command
 # snapshots the tree first, so the gates check @ as of that snapshot; the push reads its plan and
@@ -14,6 +15,46 @@
 set -euo pipefail
 
 die() { echo "❌ [jj-gate] $*" >&2; exit 1; }
+
+# Decodes a jj-quoted bookmark, tag, or remote name in `jj git push --dry-run` into REPLY,
+# failing closed on malformed quotes or unsupported escape sequences. Git ref names cannot
+# contain control characters, so only \" and \\ are decoded; any other escape fails closed.
+decode_jj_name() {
+  local raw=$1
+  if [[ "$raw" != \"* ]]; then
+    [[ -n "$raw" && "$raw" != *\"* ]] || return 1
+    REPLY=$raw
+    return 0
+  fi
+  [[ "$raw" == \"*\" && ${#raw} -ge 2 ]] || return 1
+  local inner=${raw:1:${#raw}-2}
+  local out="" i=0 len=${#inner} ch next
+  while [ "$i" -lt "$len" ]; do
+    ch=${inner:i:1}
+    if [ "$ch" = "\"" ]; then
+      return 1
+    elif [ "$ch" = "\\" ]; then
+      i=$((i + 1))
+      [ "$i" -lt "$len" ] || return 1
+      next=${inner:i:1}
+      case "$next" in
+        "\"" | "\\") out+=$next ;;
+        *) return 1 ;;
+      esac
+    else
+      out+=$ch
+    fi
+    i=$((i + 1))
+  done
+  [ -n "$out" ] || return 1
+  REPLY=$out
+}
+if [ "${1:-}" = --decode-name ]; then
+  [ $# -eq 2 ] || exit 1
+  decode_jj_name "$2" || die "cannot decode destination name"
+  printf '%s' "$REPLY"
+  exit 0
+fi
 
 command -v jj > /dev/null || die "jj is required"
 # Every parsed command (ids, descriptions, paths and push plans) must ignore forced colour.
@@ -100,12 +141,28 @@ commit_id() {
 }
 
 push() {
-  local dry again line u i remote="" in_plan=0 deletes=0 kind name what remote_sha to_id destination
+  local arg dry again line u i remote="" in_plan=0 deletes=0 kind name what remote_sha to_id destination pub_id tag_oid tag_peeled sign_on_push
   local -a updates=() # "<remote sha, or 0 for a new ref> <local sha>", as the pre-push hook gets them
+  local -a published_targets=() # tag object id for tags, or commit id for bookmarks
   local -a update_remotes=() # same indexes as updates, including across deletion-only sections
+  local -a tag_refs=() tag_oids=() # scanned tag refs and object ids, re-verified right before push
 
   [ -x scripts/review-gate.sh ] ||
     die "scripts/review-gate.sh is missing or not executable. Run: chmod +x scripts/review-gate.sh  (or jj restore scripts/review-gate.sh)"
+
+  for arg in "$@"; do
+    case "$arg" in
+      --config | --config=* | --config-file | --config-file=*)
+        die "config overrides on the command line are not allowed; set them in config instead." ;;
+      -R | -R* | --repository | --repository=* | --at-operation | --at-operation=* | --at-op | --at-op=*)
+        die "repository and operation overrides on the command line are not allowed." ;;
+    esac
+  done
+
+  sign_on_push=$(jj --ignore-working-copy config get git.sign-on-push 2> /dev/null) ||
+    die "cannot read git.sign-on-push setting safely"
+  [ "$sign_on_push" = false ] ||
+    die "git.sign-on-push is enabled, which signs commits after checks; disable it and sign beforehand with jj sign."
 
   # jj decides what a bare `jj git push` moves, so ask it rather than re-deriving that.
   # The plan is the indented lines under `Changes to push to <remote>:`, each
@@ -116,10 +173,11 @@ push() {
   # One deliberate snapshot (its warnings show once), then the plan is read without one, so it
   # compares byte for byte with the second read before the push.
   jj log -r @ --no-graph -T '' > /dev/null 2>&1 || die "cannot snapshot the checked state safely"
-  dry=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || die "cannot read the push plan safely"
+  dry=$(jj --ignore-working-copy --config git.sign-on-push=false git push --dry-run "$@" 2>&1) || die "cannot read the push plan safely"
   while IFS= read -r line; do
     if [[ "$line" =~ ^Changes\ to\ push\ to\ (.+):$ ]]; then
-      remote=${BASH_REMATCH[1]}; in_plan=1; continue
+      decode_jj_name "${BASH_REMATCH[1]}" || die "cannot decode remote name in the push plan safely. Bypass: jj git push"
+      remote=$REPLY; in_plan=1; continue
     fi
     [[ "$line" =~ ^[[:space:]] && "$in_plan" -eq 1 ]] || { in_plan=0; continue; }
     [[ "$line" =~ ^[[:space:]]+(bookmark|tag):[[:space:]]+(.+)[[:space:]]\[(.*)\]$ ]] ||
@@ -131,6 +189,8 @@ push() {
       "delete "*)               deletes=$((deletes + 1)); continue ;; # nothing to review
       *) die "cannot read the push plan safely. Bypass: jj git push" ;;
     esac
+    decode_jj_name "$name" || die "cannot decode destination name in the push plan safely. Bypass: jj git push"
+    name=$REPLY
     case "$kind" in bookmark) destination="refs/heads/$name" ;; tag) destination="refs/tags/$name" ;; esac
     printf '%s' "$destination" | scripts/hooks/home-path.sh --ref || exit 1
     # Plan tokens are commit IDs, not general revsets or same-named bookmarks/tags.
@@ -138,7 +198,20 @@ push() {
       die "cannot read commit ids in the push plan"
     [ "$remote_sha" = 0 ] || remote_sha=$(commit_id "commit_id($remote_sha)") || die "cannot resolve planned commit"
     to_id=$(commit_id "commit_id($to_id)") || die "cannot resolve planned commit"
+    pub_id=$to_id
+    if [ "$kind" = tag ]; then
+      tag_oid=$(git --no-replace-objects rev-parse --verify --quiet "refs/tags/$name") ||
+        die "cannot resolve tag object in the push plan safely"
+      tag_peeled=$(git --no-replace-objects rev-parse --verify --quiet "$tag_oid^{commit}") ||
+        die "cannot peel tag object in the push plan safely"
+      [ "$tag_peeled" = "$to_id" ] ||
+        die "tag object does not match the planned commit"
+      pub_id=$tag_oid
+      tag_refs+=("refs/tags/$name")
+      tag_oids+=("$tag_oid")
+    fi
     updates+=("$remote_sha $to_id")
+    published_targets+=("$pub_id")
     update_remotes+=("$remote")
   done <<< "$dry"
 
@@ -153,8 +226,7 @@ push() {
     for i in "${!updates[@]}"; do
       u=${updates[$i]}
       check_messages "trunk()..commit_id(${u#* })" 1 || exit 1
-      # shellcheck disable=SC2086 # two validated ids, split on purpose
-      scripts/hooks/home-path.sh --published $u "${update_remotes[$i]}" || exit 1
+      scripts/hooks/home-path.sh --published "${u%% *}" "${published_targets[$i]}" "${update_remotes[$i]}" || exit 1
     done
     if [ "${SKIP_REVIEW_GATE:-0}" = "1" ]; then
       echo "[review-gate] SKIP_REVIEW_GATE=1 — pushing unreviewed."
@@ -170,9 +242,15 @@ push() {
   # Push exactly the plan the gates checked. A plain push would snapshot @ again, so a file
   # edited while the tests ran would land in a commit nobody checked; and a bookmark another
   # jj process moved meanwhile would change the plan, so refuse then.
-  again=$(jj --ignore-working-copy git push --dry-run "$@" 2>&1) || die "cannot reread the push plan safely"
+  again=$(jj --ignore-working-copy --config git.sign-on-push=false git push --dry-run "$@" 2>&1) || die "cannot reread the push plan safely"
   [ "$again" = "$dry" ] || die "the push plan changed while the gates ran; rerun jj gpush."
-  jj --ignore-working-copy git push "$@" > /dev/null 2>&1 || die "push failed; inspect the remote state before retrying"
+  for i in "${!tag_refs[@]}"; do
+    tag_oid=$(git --no-replace-objects rev-parse --verify --quiet "${tag_refs[$i]}") ||
+      die "the push plan changed while the gates ran; rerun jj gpush."
+    [ "$tag_oid" = "${tag_oids[$i]}" ] ||
+      die "the push plan changed while the gates ran; rerun jj gpush."
+  done
+  jj --ignore-working-copy --config git.sign-on-push=false git push "$@" > /dev/null 2>&1 || die "push failed; inspect the remote state before retrying"
   echo "[jj-gate] checked push completed."
 }
 

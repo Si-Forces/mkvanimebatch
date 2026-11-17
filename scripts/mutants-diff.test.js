@@ -142,7 +142,8 @@ test("refuses an edit hidden behind assume-unchanged", () => {
   fs.writeFileSync(path.join(repo.dir, "a.rs"), "edited\n");
   const r = run(repo, [repo.c1]);
   assert.equal(r.status, 65);
-  assert.match(r.stderr, /a\.rs/);
+  assert.match(r.stderr, /1 file\(s\) differ from the index/);
+  assert.doesNotMatch(r.stderr, /a\.rs/);
   assert.equal(r.args, undefined);
 });
 

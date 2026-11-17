@@ -68,7 +68,8 @@ untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'de
 if [ -n "$dirty$untracked$hidden" ]; then
   echo "❌ [pre-push] the working tree differs from HEAD, so the tests would not run on the pushed commit." >&2
   if [ -n "$dirty$untracked" ]; then
-    printf '%s\n%s\n' "$dirty" "$untracked" | sed '/^$/d; s/^/     /' >&2
+    count=$(printf '%s\n%s\n' "$dirty" "$untracked" | grep -c . || true)
+    echo "     ($count modified/untracked file(s); run git status to inspect them)" >&2
     echo "   Commit, stash or remove them." >&2
   fi
   [ -z "$hidden" ] || explain_hidden_changes "$hidden"

@@ -114,13 +114,16 @@ class Objects {
       throw new Error("invalid message object");
     const size = Number(header[2]);
     if (!Number.isSafeInteger(size)) throw new Error("invalid object size");
-    let body = false, number = 1, target;
+    let body = false, number = 1, headerNumber = 1, target;
     for await (const line of records(this.bytes(size))) {
       if (body) { if (report) await emit(kind, id, number++, Buffer.from(kind), line); }
       else if (!line.length) body = true;
-      else if (line.subarray(0, 7).equals(Buffer.from("object "))) {
-        if (target) throw new Error("duplicate tag target");
-        target = line.subarray(7).toString("ascii");
+      else {
+        if (line.subarray(0, 7).equals(Buffer.from("object "))) {
+          if (target) throw new Error("duplicate tag target");
+          target = line.subarray(7).toString("ascii");
+        }
+        if (report) await emit(kind, id, headerNumber++, Buffer.from("header"), line);
       }
     }
     if ((await this.line()).length !== 0) throw new Error("invalid object separator");
@@ -243,7 +246,7 @@ async function inherited(lines, parents, cache) {
   if (lines.length) { cache.line = lines.at(-1); cache.found = answers.at(-1); }
   return answers;
 }
-async function content(id, file, old, current, parents = []) {
+async function content(id, file, old, current, parents) {
   if (/^0+$/.test(current)) return;
   let number = 1;
   let pending = [], bytes = 0;
@@ -258,7 +261,6 @@ async function content(id, file, old, current, parents = []) {
     pending = []; bytes = 0;
   }
   async function candidate(line, at) {
-    if (!parents.length) { await emit("binary", id, at, file, line); return; }
     pending.push({ line, number: at }); bytes += line.length;
     if (pending.length >= 64 || bytes >= 65536) await flush();
   }
@@ -284,7 +286,7 @@ async function content(id, file, old, current, parents = []) {
   await flush();
 }
 
-async function changes(args, id = "0", local = false) {
+async function changes(args, id = "0") {
   let commit = id, parents = [], pending, patches;
   async function drain() {
     if (patches && !(await patches.next()).done) throw new Error("unmatched merge file");
@@ -294,9 +296,7 @@ async function changes(args, id = "0", local = false) {
     if (pending) {
       const { status, modes, blobs } = pending; pending = undefined;
       if (/^A+$/.test(status)) await name("filename", commit, token);
-      if (local && modes.at(-1) !== "160000" && !/^D+$/.test(status))
-        await content(commit, token, modes[0] === "160000" ? "0" : blobs[0], blobs.at(-1));
-      else if (patches) {
+      if (patches) {
         const patch = await patches.next();
         if (patch.done || !patch.value.file.equals(token)) throw new Error("merge path mismatch");
         if (patch.value.binary && modes.at(-1) !== "160000" && !/^D+$/.test(status)) {
@@ -346,7 +346,7 @@ async function main() {
     } else if (mode === "staged" && !args.length) {
       await changes(["diff", "--cached", "--raw", "-z", "--no-abbrev", ...namesFlags]);
     } else if (mode === "between" && args.length === 2 && args.every(v => hex.test(v))) {
-      await changes(["diff", "--raw", "-z", "--no-abbrev", ...namesFlags, ...args], "0", true);
+      await changes(["diff", "--raw", "-z", "--no-abbrev", ...namesFlags, ...args]);
     } else if (mode === "published" && args.length === 3 && args.every(v => v === "0" || hex.test(v))) {
       const [old, tip, baseline] = args;
       const commit = await peel(tip, objects, await commonTag(old, tip, objects));

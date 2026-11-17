@@ -47,28 +47,38 @@ message, filename, ref-name and prepared PR body inputs; see [GLOSSARY.md](GLOSS
   Redaction checks suffix boundaries and merges overlapping spans, including dashed matches
   starting inside another home; unrelated sibling names retain their spelling. Use relative
   paths, `~` or placeholders such as `<repo>`, then rewrite the commit that added the hit.
-  Added/renamed paths report `:filename`, full destination refs `:ref`, and messages
-  `message:<line>` or `tag-message:<line>`; prepared descriptions report `pr-body:<line>`.
+  Added/renamed paths report `:filename`, full destination refs `:ref`, messages
+  `message:<line>` or `tag-message:<line>`, and commit/tag headers (such as `mergetag`)
+  `header:<line>`; prepared descriptions report `pr-body:<line>`.
 - **Inputs:** `--staged` reads the index. `jj gate` supplies the net diff since the fork point;
   it does not inspect intermediate file changes. `--between <base> <tip>` checks those stored
-  snapshots, binary content included; the jj gate refuses unresolved conflicts before this call. `--text message`
+  snapshots via `git diff` (binary content included, pure renames pass) plus added/renamed
+  filenames via `home-path-input.js`; the jj gate refuses unresolved conflicts before this call. `--text message`
   checks the entire proposed Git draft, including comments and verbose context, before any
   AI-trailer diagnostic. Cleanup overrides cannot be inferred by the hook, so local false
-  positives are deliberate. jj and publication checks read stored message bytes.
+  positives are deliberate. jj and publication checks read stored message and header bytes.
   `--published <old> <new> [remote]` reads every
   commit in `old..new`, even if fetched or held by another remote. Both ids must be full.
   For a new ref (`old=0`), only `refs/remotes/<remote>/main`, when known, is excluded, and
   only when that remote has one effective push URL equal to its fetch URL. Unknown URLs,
-  different/multiple push URLs or a missing main baseline scan all reachable history. Existing
+  different/multiple push URLs or a missing main baseline scan all reachable history; when a
+  refusal happens without a trusted baseline, the diagnostic prints once per run noting that
+  all history was checked and suggesting pushing via a named remote and fetching its `main`
+  with matching fetch/push URLs. Existing
   refs use the destination old tip from the push protocol/plan, never every remote ref.
   Pushes pass that range before either SKIP variable.
   New tag annotations are walked separately, including nested tags over known commits, up to
   the destination's old-object boundary. New/updated targets must resolve to commits; blob/tree
   targets refuse before SKIP settings. Deletions pass. Filename input uses NUL-delimited raw
   changes, including empty additions and pure renames; existing names and deletions are not hits.
-  jj expands short names to their full destination refs before checking them.
+  jj decodes quoted remote and destination names (handling only `\"` and `\\` and failing
+  closed on other escapes), expands short names to their full destination refs, resolves
+  pushed tag refs to their tag object IDs (confirming they peel to the planned commit and
+  re-verifying them immediately before pushing), refuses `--config`/`--config-file`/
+  `-R`/`--repository`/`--at-operation`/`--at-op` CLI overrides or an enabled
+  `git.sign-on-push`, and pins `--config git.sign-on-push=false` on the push itself.
 - **Git settings:** machine-readable history disables signature display. The shared diff flags force text, no color, no external diff/textconv,
-  no relative paths and fixed prefixes. Replace refs and grafts are ignored; root commits
+  no relative paths, fixed prefixes, `--submodule=short` and `--find-renames=100%` (exempting only 100% pure renames across `--staged`, `--published` and `--between` regardless of `diff.renames`). Replace refs and grafts are ignored; root commits
   count. Text merges use Git's combined diff, including conservative moved-line false positives.
   Binary merges verify matching raw candidate lines against corresponding parent files, so
   moved or copied inherited lines pass. Pre-commit is stricter: its
@@ -88,10 +98,13 @@ message, filename, ref-name and prepared PR body inputs; see [GLOSSARY.md](GLOSS
   spaces, `%2F` and Unicode-escaped slashes. Conservative boundaries refuse
   siblings such as `<home>+x`, `<home>./x`, `<home>..x` or `<home>é/x`, and flag/CSS names
   starting with a dashed identity. Previously published GitHub objects require GitHub Support
-  to purge; changing this checker or rewriting a branch cannot retract them.
+  to purge; changing this checker or rewriting a branch cannot retract them. Under `jj gpush`,
+  `jj git push` resolves tag objects at push time, so a concurrent process swapping a Git tag
+  ref between the final re-check and `jj git push` can still push the replacement unchecked.
 - **Tools:** the checker requires Node (repo minimum 20) and Bash 3.2+. Pre-commit and the jj
   gate need Bash 4.4+ (`mapfile -d`, process-substitution wait, empty arrays under nounset).
   The full hook test suite requires Bash 4.4+; on macOS select a newer Bash through PATH.
+  `MKV_REQUIRE_JJ=1` (set in CI `ui-tests`) makes missing `jj` fail the tests instead of skipping.
   jj output is forced to plain text for all parsed commands, even with `ui.color="always"`.
 
 When changing `scripts/hooks/home-path.sh` or its gate wiring, update the matching cases
@@ -106,7 +119,7 @@ Run `node scripts/bench-home-path.js > memory.json` for the manual scanner bench
 stdin, published-history and binary-merge scans, and emits JSON with source/environment details,
 peak RSS, elapsed time and checked exit codes; it is not a CI timing gate.
 
-The two dirty-tree checks (pre-commit's, when it runs cargo, and pre-push's, before its test gate) also refuse while an assume-unchanged or skip-worktree file is missing or differs from the index, since git diff cannot see that. Pre-commit looks only at the files cargo reads (Rust, Cargo and `desktop-slint/ui`); pre-push looks at every flagged file. A flagged file that still matches the index passes. The refusal says how to fix it. `scripts/mutants-diff.sh` makes the same check over every flagged file, since cargo-mutants copies the working tree. To bypass pre-commit's check, use `git commit --no-verify`, which skips all of commit-msg and pre-commit; to bypass pre-push's, use `SKIP_SLOW_GATES=1`, which skips its test gate. In a sparse checkout the out-of-cone files are missing, so pre-push refuses whenever it reaches its test gate, and pre-commit refuses when it runs cargo while any file cargo reads is out of the cone. Those refusals hold only while `scripts/` is in the cone: outside it the hooks are missing too, and git runs no gate at all.
+The two dirty-tree checks (pre-commit's, when it runs cargo, and pre-push's, before its test gate) also refuse while an assume-unchanged or skip-worktree file is missing or differs from the index, since git diff cannot see that. Pre-commit looks only at the files cargo reads (Rust, Cargo and `desktop-slint/ui`); pre-push looks at every flagged file. A flagged file that still matches the index passes. For unstaged, untracked and hidden-change paths they report file counts rather than echoing raw filenames, and `explain_hidden_changes` prints a `git ls-files -v` command to list flagged files (counting NUL-delimited entries and failing closed on `git hash-object` errors). `scripts/mutants-diff.sh` makes the same check over every flagged file, since cargo-mutants copies the working tree. To bypass pre-commit's check, use `git commit --no-verify`, which skips all of commit-msg and pre-commit; to bypass pre-push's, use `SKIP_SLOW_GATES=1`, which skips its test gate. In a sparse checkout the out-of-cone files are missing, so pre-push refuses whenever it reaches its test gate, and pre-commit refuses when it runs cargo while any file cargo reads is out of the cone. Those refusals hold only while `scripts/` is in the cone: outside it the hooks are missing too, and git runs no gate at all.
 
 The hooks run straight from the working tree, so an uncommitted edit to `scripts/hooks/` or `scripts/review-gate.sh` changes the gates at once.
 

@@ -33,7 +33,8 @@ if [ "$rust" -eq 1 ]; then
   if [ -n "$unstaged$untracked$hidden" ]; then
     echo "❌ [pre-commit] Rust/Cargo files differ from the index, so cargo would not check the commit." >&2
     if [ -n "$unstaged$untracked" ]; then
-      printf '%s\n%s\n' "$unstaged" "$untracked" | sed '/^$/d; s/^/     /' >&2
+      count=$(printf '%s\n%s\n' "$unstaged" "$untracked" | grep -c . || true)
+      echo "     ($count unstaged/untracked file(s); run git status to inspect them)" >&2
       echo "   Stage them, or set them aside with: git stash push --keep-index --include-untracked" >&2
     fi
     [ -z "$hidden" ] || explain_hidden_changes "$hidden"

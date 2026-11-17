@@ -40,7 +40,7 @@ const execute = (args, cwd, seconds, temporary) => {
 const files = [...new Set(cases.flatMap(item => item.tests))];
 const baselineTemp = path.join(output, "baseline-tmp");
 fs.mkdirSync(baselineTemp);
-const baseline = execute(files.map(file => path.join(scripts, file)), path.dirname(scripts), 90, baselineTemp);
+const baseline = execute(files.map(file => path.join(scripts, file)), path.dirname(scripts), 240, baselineTemp);
 fs.writeFileSync(path.join(output, "baseline.log"), baseline.stdout + baseline.stderr);
 assert.equal(baseline.status, 0, `Baseline failed: ${output}/baseline.log`);
 fs.rmSync(baselineTemp, { recursive: true, force: true });

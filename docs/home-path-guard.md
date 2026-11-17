@@ -1,7 +1,6 @@
 # Finish the home-path guard issues
 
-Status: design confirmed on 2026-11-16; implementation follows the completion criteria below.
-This document describes intended work, not shipped coverage.
+Status: shipped (2026-11-16, with follow-up fixes); this document preserves the design record.
 See [scripts/CLAUDE.md](../scripts/CLAUDE.md) for the current contract and
 [the glossary](../scripts/GLOSSARY.md) for terms.
 
@@ -58,8 +57,7 @@ See [scripts/CLAUDE.md](../scripts/CLAUDE.md) for the current contract and
 - Capture the final prepared PR body, check it, and publish those same bytes. Any footer is
   part of that body before checking. Body generation or editing after checking would break
   the guarantee.
-- Document the checked PR command in AGENTS.md and the issue-tracker guide. Preserve the usual
-  workflow worker's publication prohibition and direct its handoff to the checked command.
+- Document the checked PR command in AGENTS.md and the issue-tracker guide.
   Direct REST fallbacks from external skills remain bypasses; global skills are not changed.
 - Every new Git object read ignores replace refs and grafts, as the existing home-path reads
   do: use --no-replace-objects and GIT_GRAFT_FILE=/dev/null. This covers message, tag, tree,
@@ -122,7 +120,10 @@ See [scripts/CLAUDE.md](../scripts/CLAUDE.md) for the current contract and
   the new outer body is checked and the old inner body stays within the trusted old boundary.
   Exercise nested annotation objects through real Git pre-push. jj tests cover the actual
   bookmark/tag publication capabilities of the installed jj; do not claim jj creates or
-  preserves annotations it does not support.
+  preserves annotations it does not support. Known limitation: `jj git push` resolves the
+  tag object to send at push time, so a concurrent process replacing a Git tag ref in the
+  instant between `jj gpush`'s final tag-object re-check and `jj git push` can push the
+  replacement tag object unchecked.
 
 ## Required outcomes from the issues
 

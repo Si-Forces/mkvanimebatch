@@ -13,7 +13,7 @@ test("refuses an added line naming HOME, with the file and line number but not t
   hit(r);
   // HOME and its resolved form are the same path here: one line per hit, not one per form.
   assert.equal(r.stderr.split("a.js:1\n").length - 1, 1, r.stderr);
-  // The report may end up in a PR description, which nothing checks.
+  // The report may end up in a PR description, so never echo raw source text.
   assert.ok(!r.stderr.includes(home) && !r.stderr.includes("My Project"), r.stderr);
 });
 
@@ -942,4 +942,82 @@ test("--published checks what a merge resolution adds, and nothing a parent alre
   const r = run("", {}, { args: publishedArgs(merge), cwd: repo });
   hit(r);
   assert.equal(r.stderr.split("\n").filter((l) => l.startsWith("     ")).join("\n"), `     ${merge.slice(0, 12)} b/f.txt:4`);
+});
+
+test("--published distinguishes a missing baseline from a trusted baseline in its refusal guidance", () => {
+  const { dir, git, commit } = gitRepo("no-baseline-guidance");
+  git("remote", "add", "origin", path.join(tmp, "no-baseline-guidance.git"));
+  const leak = commit(`${home}/public-history\n`);
+  const clean = commit("clean\n");
+  const msgLeak = (() => {
+    git("commit", "--allow-empty", "-qm", `${home}/msg`, "--no-verify");
+    return git("rev-parse", "HEAD");
+  })();
+
+  const msgAndDiffLeak = (() => {
+    fs.writeFileSync(path.join(dir, "f.txt"), `${home}/diff-and-msg\n`);
+    git("add", "f.txt");
+    git("commit", "-qm", `${home}/msg-and-diff`, "--no-verify");
+    return git("rev-parse", "HEAD");
+  })();
+
+  for (const tip of [clean, msgLeak, msgAndDiffLeak]) {
+    const noBase = run("", {}, { args: publishedArgs(tip), cwd: dir });
+    hit(noBase);
+    assert.match(noBase.stderr, /rewrite the commit that adds it/);
+    assert.equal(noBase.stderr.match(/No trusted baseline was found, so all history was checked/g)?.length, 1, noBase.stderr);
+    assert.match(noBase.stderr, /push via a named remote and fetch its main \(with matching fetch and push URLs\)/);
+  }
+
+  // With a trusted baseline (or an existing ref range), the normal rewrite hint applies.
+  const base = msgAndDiffLeak;
+  const newLeak = commit(`${home}/new-leak\n`);
+  const trusted = run("", {}, { args: publishedArgs(newLeak, base), cwd: dir });
+  hit(trusted);
+  assert.match(trusted.stderr, /rewrite the commit that adds it/);
+  assert.doesNotMatch(trusted.stderr, /No trusted baseline was found/);
+
+  git("update-ref", "refs/remotes/origin/main", base);
+  const withBase = run("", {}, { args: publishedArgs(newLeak), cwd: dir });
+  hit(withBase);
+  assert.match(withBase.stderr, /rewrite the commit that adds it/);
+  assert.doesNotMatch(withBase.stderr, /No trusted baseline was found/);
+});
+
+test("submodule updates ignore diff.submodule=diff while submodule-to-file replacements refuse", () => {
+  const { dir, git } = gitRepo("submodule-short");
+  const sub = path.join(dir, "submod");
+  fs.mkdirSync(sub);
+  sh(sub, "git", ["init", "-q", "-b", "main"]);
+  sh(sub, "git", ["commit", "--allow-empty", "-qm", "sub1"]);
+  fs.writeFileSync(path.join(sub, "s.txt"), "clean\n");
+  sh(sub, "git", ["add", "s.txt"]);
+  sh(sub, "git", ["commit", "-qm", "sub2"]);
+  const sub1 = sh(sub, "git", ["rev-parse", "HEAD~1"]).out.trim();
+  fs.writeFileSync(path.join(sub, "s.txt"), `${home}/inside-submodule\n`);
+  sh(sub, "git", ["add", "s.txt"]);
+  sh(sub, "git", ["commit", "-qm", "sub3"]);
+  const sub2 = sh(sub, "git", ["rev-parse", "HEAD"]).out.trim();
+
+  git("config", "diff.submodule", "diff");
+  git("update-index", "--add", "--cacheinfo", `160000,${sub1},submod`);
+  git("commit", "-qm", "add submod");
+  const base = git("rev-parse", "HEAD");
+
+  git("update-index", "--replace", "--cacheinfo", `160000,${sub2},submod`);
+  assert.deepEqual(run("", {}, { cwd: dir, args: ["--staged"] }), { status: 0, stderr: "" });
+  git("commit", "-qm", "update submod");
+  const updated = git("rev-parse", "HEAD");
+  assert.deepEqual(run("", {}, { cwd: dir, args: ["--between", base, updated] }), { status: 0, stderr: "" });
+  assert.deepEqual(run("", {}, { cwd: dir, args: publishedArgs(updated, base) }), { status: 0, stderr: "" });
+
+  git("rm", "-q", "--cached", "submod");
+  fs.rmSync(sub, { recursive: true, force: true });
+  fs.writeFileSync(sub, `${home}/replaced-with-file\n`);
+  git("add", "submod");
+  hit(run("", {}, { cwd: dir, args: ["--staged"] }));
+  git("commit", "-qm", "replace submodule with file");
+  const replaced = git("rev-parse", "HEAD");
+  hit(run("", {}, { cwd: dir, args: ["--between", updated, replaced] }));
+  hit(run("", {}, { cwd: dir, args: publishedArgs(replaced, updated) }));
 });
