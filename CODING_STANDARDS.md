@@ -1,6 +1,6 @@
 # CODING_STANDARDS.md
 
-Judgement-call rules for reviewers: the code-review skill's Standards axis and the usual workflow's review agents. Mechanical rules belong in `jj gate` and CI, not here. Each rule cites the defect a review missed.
+Judgement-call rules for reviewers, such as the code-review skill's Standards axis. Mechanical rules belong in `jj gate` and CI, not here. Each rule cites the defect a review missed.
 
 ## Filesystem paths
 

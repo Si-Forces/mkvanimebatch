@@ -62,11 +62,9 @@ CI also runs `cargo audit` (ignores in `.cargo/audit.toml`) and actionlint. Its 
 
 ## Workflow rules
 
-In a Claude Code cloud session (`CLAUDE_CODE_REMOTE=true`), or before merging a cloud session's branch, read `docs/agents/cloud-sessions.md` first.
-
 ### Code review for every commit
 
-Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. There are two copies of it: Claude Code loads `anthropic-skills:code-review` (not the built-in `/code-review`); other agents, or Claude Code without that skill, read `.agents/skills/code-review/SKILL.md`. Keep the two identical: change one, then copy it to the other (the claude.ai copy is re-uploaded). `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
+Every change needs a Standards + Spec review before it is finalized; `jj gpush` refuses a non-empty commit without a recorded review. Run the code-review skill on the full committed diff (both axes in parallel sub-agents; the sub-agents work from the diff and source alone, with no cargo runs), then fix or explicitly accept the findings. The repo copy, `.agents/skills/code-review/SKILL.md`, is the source: other agents read it, and Claude Code loads a copy of it installed as the user skill `code-review` (`~/.claude/skills/code-review`, not the built-in `/code-review`). Change the repo copy, then copy the `.agents/skills/code-review/` folder over `~/.claude/skills/code-review/`; Claude Code without that skill reads the repo file. `jj commit` is a local snapshot, so the practical sequence is commit → review → record → `jj gpush`; amend with `jj squash`/`jj describe` and re-review/re-record if findings land after the commit.
 
 Record the review or `jj gpush` refuses the push:
 

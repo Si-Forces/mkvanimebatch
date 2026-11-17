@@ -13,8 +13,8 @@ Enable the tracked hooks once per clone with `scripts/install-git-hooks.sh`, whi
 The JavaScript path globs also cover nested files: Bash `case` patterns such as
 `scripts/*.js` match `/`, so `scripts/test-support/*.js` is included.
 `scripts/home-path-wiring.test.js` pins that syntax coverage in pre-commit and `jj gate`.
-Workflow files in `.claude/workflows/` use runtime syntax, including top-level `return`;
-`scripts/usual-workflow.test.js` parses `usual.js` with the runtime's async-function wrapper.
+Workflow files added under `.claude/workflows/` use runtime syntax, including top-level `return`,
+so the gates' `node --check` does not cover them.
 
 `scripts/hooks/home-path.sh` is the **home-path check**. It prevents accidental publication of
 the checking environment's home identities. Its matcher and redactor are shared by content,
@@ -22,8 +22,7 @@ message, filename, ref-name and prepared PR body inputs; see [GLOSSARY.md](GLOSS
 
 - **Coverage:** active installed Git hooks, or explicit `jj gate` and `jj gpush` use. `jj commit`
   runs no gate. Identities come from the checking process's `HOME` and `USERPROFILE`; another
-  machine's home is not detected. [Cloud sessions](../docs/agents/cloud-sessions.md) need the
-  maintainer's per-commit check after fetching; it cannot undo their prior publication.
+  machine's home is not detected.
   PR descriptions use `node scripts/pr-publish.js` for create and body updates; required flags
   and bypasses are in [the issue-tracker guide](../docs/agents/issue-tracker.md).
 - **Identities:** HOME as set and resolved, and USERPROFILE with either slash or JSON-doubled
@@ -62,7 +61,7 @@ message, filename, ref-name and prepared PR body inputs; see [GLOSSARY.md](GLOSS
   only when that remote has one effective push URL equal to its fetch URL. Unknown URLs,
   different/multiple push URLs or a missing main baseline scan all reachable history. Existing
   refs use the destination old tip from the push protocol/plan, never every remote ref.
-  Pushes pass that range before either SKIP variable. Cloud checks pass explicit main/tip ids.
+  Pushes pass that range before either SKIP variable.
   New tag annotations are walked separately, including nested tags over known commits, up to
   the destination's old-object boundary. New/updated targets must resolve to commits; blob/tree
   targets refuse before SKIP settings. Deletions pass. Filename input uses NUL-delimited raw

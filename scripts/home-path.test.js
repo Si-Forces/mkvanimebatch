@@ -833,7 +833,7 @@ test("--published scans fetched add/remove history against the destination, incl
   const leak = commit(`${home}/secret\n`);
   const tip = commit("clean again\n");
   git("update-ref", "refs/remotes/origin/main", base);
-  git("update-ref", "refs/remotes/origin/cloud-topic", tip);
+  git("update-ref", "refs/remotes/origin/fetched-topic", tip);
   git("update-ref", "refs/remotes/private/main", tip);
   git("update-ref", "refs/remotes/unconfigured/main", tip);
   for (const args of [
