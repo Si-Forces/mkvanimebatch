@@ -22,8 +22,7 @@ message, filename, ref-name and prepared PR body inputs; see [GLOSSARY.md](GLOSS
 
 - **Coverage:** active installed Git hooks, or explicit `jj gate` and `jj gpush` use. `jj commit`
   runs no gate. Identities come from the checking process's `HOME` and `USERPROFILE`; another
-  machine's home is not detected. [Cloud sessions](../docs/agents/cloud-sessions.md) need the
-  maintainer's per-commit check after fetching; it cannot undo their prior publication.
+  machine's home is not detected.
   PR descriptions use `node scripts/pr-publish.js` for create and body updates; required flags
   and bypasses are in [the issue-tracker guide](../docs/agents/issue-tracker.md).
 - **Identities:** HOME as set and resolved, and USERPROFILE with either slash or JSON-doubled
@@ -62,7 +61,7 @@ message, filename, ref-name and prepared PR body inputs; see [GLOSSARY.md](GLOSS
   only when that remote has one effective push URL equal to its fetch URL. Unknown URLs,
   different/multiple push URLs or a missing main baseline scan all reachable history. Existing
   refs use the destination old tip from the push protocol/plan, never every remote ref.
-  Pushes pass that range before either SKIP variable. Cloud checks pass explicit main/tip ids.
+  Pushes pass that range before either SKIP variable.
   New tag annotations are walked separately, including nested tags over known commits, up to
   the destination's old-object boundary. New/updated targets must resolve to commits; blob/tree
   targets refuse before SKIP settings. Deletions pass. Filename input uses NUL-delimited raw

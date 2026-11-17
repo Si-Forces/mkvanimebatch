@@ -199,9 +199,9 @@ test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !has
   fs.writeFileSync(path.join(dir, "f.txt"), "clean\n");
   assert.equal(jj("commit", "-m", "fix").status, 0);
   assert.equal(jj("bookmark", "create", "topic", "-r", "@-").status, 0);
-  // Fetching the branch to origin/topic must not hide it from a later publication scan.
+  // Fetching the branch to origin/fetched-topic must not hide it from a later publication scan.
   const tip = jj("log", "--no-graph", "-r", "@-", "-T", "commit_id").out.trim();
-  git("update-ref", "refs/remotes/origin/cloud-topic", tip);
+  git("update-ref", "refs/remotes/origin/fetched-topic", tip);
   const push = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "-b", "topic"], { JJ_CONFIG: colour, ...SKIP });
   assert.equal(push.status, 1, push.out);
   // Per commit: the leak's own commit, though the pushed tip removes it again.
