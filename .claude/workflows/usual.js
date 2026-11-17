@@ -25,7 +25,7 @@ export const meta = {
 //   spec         the settled design, or the verified findings to fix, with expected inputs/outputs
 //   review_focus optional: what the reviewer should hand-trace beyond the spec
 //   commit_hint  optional: conventional commit subject
-//   skills       optional array of extra skills, e.g. ['slint:slint', 'anthropic-skills:domain-modeling']
+//   skills       optional array of extra skills, e.g. ['slint:slint', 'domain-modeling']
 //   repo         the checkout the agents work in: the session's working directory (`pwd`)
 //   notes        the PR-notes directory, normally <main checkout>/mkvanimebatch-notes/audit-fixes
 //                (gitignored, so a worktree lacks it); the notes file is pr-<issue>.md
@@ -60,7 +60,7 @@ const BM = A.bookmark
 const FIX_MODE = A.mode === 'fix'
 const SCOPE_FROM = FIX_MODE ? A.prev : A.base
 const PKGS = A.crates.map((c) => `-p ${c}`).join(' ')
-const SKILL_LIST = ['anthropic-skills:ponytail', 'anthropic-skills:rust-skills', ...(A.skills || [])]
+const SKILL_LIST = ['ponytail', 'rust-skills', ...(A.skills || [])]
 const SKILLS = `Before your first edit, load these skills with the Skill tool and follow them: ${SKILL_LIST.map((s) => `\`${s}\``).join(', ')}. Report the ones you loaded in \`skills_loaded\`.`
 // Single-quotes a path for the shell, so $, " and spaces in it stay literal.
 const shQuote = (s) => `'${s.replaceAll("'", `'\\''`)}'`
@@ -108,7 +108,7 @@ const FINDINGS_SCHEMA = {
 }
 // Reviews run as the code-reviewer agent (.claude/agents/code-reviewer.md, shipped in the repo
 // so every session has it); its Critical/Required/Optional/Nit labels map onto the schema's.
-const review = (scope, body) => `Review in ${REPO}. Read-only: no edits, no cargo builds or tests, no GitHub writes; \`rg\` is available. Load the \`anthropic-skills:rust-skills\` skill first and report the skills you loaded in \`skills_loaded\`. Scope: ${scope}.
+const review = (scope, body) => `Review in ${REPO}. Read-only: no edits, no cargo builds or tests, no GitHub writes; \`rg\` is available. Load the \`rust-skills\` skill first and report the skills you loaded in \`skills_loaded\`. Scope: ${scope}.
 SPEC: ${A.spec}
 ${body}
 STANDARDS: AGENTS.md, CODING_STANDARDS.md (apply every rule), the area CLAUDE.md files for what the diff touches, and the glossary terms in the CONTEXT.md files; ponytail's minimal diff; accurate doc comments, the surrounding style, 100-column wrap; #[cfg] code clean on both Linux and Windows; tests never change the current directory.

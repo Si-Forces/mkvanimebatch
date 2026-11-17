@@ -104,7 +104,7 @@ When the caller gives an output schema or format, use it instead of this templat
 ## Composition
 
 - **Invoke directly when:** the user asks for a review of a specific change, file, or PR.
-- **Invoke via:** the `usual` workflow (`.claude/workflows/usual.js`), whose Re-review and Last-commit review steps run as this agent. Bash and Skill are in `tools` so those reviews can read the diff with `git` and `rg` and load `anthropic-skills:rust-skills`; rule 7 and the workflow's prompt keep the review read-only.
+- **Invoke via:** the `usual` workflow (`.claude/workflows/usual.js`), whose Re-review and Last-commit review steps run as this agent. Bash and Skill are in `tools` so those reviews can read the diff with `git` and `rg` and load `rust-skills`; rule 7 and the workflow's prompt keep the review read-only.
 - **Not the commit review:** AGENTS.md still requires the code-review skill's Standards + Spec review for every commit. This review is extra; never record it with `scripts/review-gate.sh`.
 - **Deeper passes:** if a change needs a dedicated security or test pass, recommend it in your report; the caller decides whether to run one.
 - **Source of truth:** this repo copy. In this repo it takes precedence over a user-level `~/.claude/agents/code-reviewer.md` of the same name, so make persona changes here. From the `# Senior Code Reviewer` heading to this section the text is identical in `.codex/agents/code-reviewer.toml`: copy a change there too (`scripts/agent-personas.test.js` checks it).
