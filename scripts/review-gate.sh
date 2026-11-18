@@ -27,6 +27,13 @@ die() { echo "[review-gate] $*" >&2; exit 1; }
 
 command -v node > /dev/null || die "node is required"
 
+# Read the commits as stored, which is what a push sends: a local replace ref or graft could
+# otherwise hide a commit from the walk or change the diff its patch id is keyed on. The graft
+# file is a path that cannot exist: git warns that grafts are deprecated whenever it can read one,
+# /dev/null included. home-path.sh can use /dev/null because it hides git's stderr; this script
+# shows it.
+export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null/none
+
 # The common git dir is shared by every worktree of this clone.
 LEDGER="${REVIEW_LEDGER:-$(git rev-parse --path-format=absolute --git-common-dir)/review-ledger.jsonl}"
 
