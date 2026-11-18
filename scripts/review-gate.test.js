@@ -1,4 +1,5 @@
-// The review-gate ledger reads the commits a push sends, past local git replace refs and grafts.
+// The review-gate ledger reads the commits a push sends, past local git replace refs and grafts
+// and past local refs that shadow origin/main.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -44,6 +45,29 @@ for (const [how, hide] of Object.entries(hides)) {
     refusesHidden(f.gate("verify-push", "0".repeat(40), f.tip), f.hidden);
   });
 }
+
+// As a revision, origin/main resolves to refs/tags or refs/heads before refs/remotes. The full
+// refs/remotes/origin/main name can resolve to refs/heads/refs/remotes/origin/main, so the
+// last case and the next test guard against looking that name up with rev-parse.
+for (const [kind, name] of [["tag", "origin/main"], ["branch", "origin/main"], ["branch", "refs/remotes/origin/main"]]) {
+  test(`verify-push ignores a local ${kind} named ${name}`, () => {
+    const f = fixture(`shadow-${kind}-${name.replace(/\W+/g, "-")}`);
+    f.git(kind, name, f.tip);
+    const r = f.gate("verify-push", "0".repeat(40), f.tip);
+    refusesHidden(r, f.hidden);
+    assert.doesNotMatch(r.out, /ambiguous/);
+  });
+}
+
+test("verify-push without origin/main ignores a local branch named refs/remotes/origin/main", () => {
+  const f = fixture("shadow-missing");
+  f.git("update-ref", "-d", "refs/remotes/origin/main");
+  f.git("branch", "refs/remotes/origin/main", f.tip);
+  const fresh = f.gate("verify-push", "0".repeat(40), f.tip);
+  assert.equal(fresh.status, 1, fresh.out);
+  assert.match(fresh.out, /no origin\/main/);
+  refusesHidden(f.gate("verify-push", f.base, f.tip), f.hidden);
+});
 
 test("pre-push refuses a commit hidden by a replace ref", () => {
   const f = fixture("pre-push-replace");
