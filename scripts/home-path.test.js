@@ -107,6 +107,11 @@ test("refuses newline identities instead of splitting them into unrelated home f
     assert.match(r.stderr, /must not contain newlines/);
     assert.doesNotMatch(r.stderr, /home\.txt|check/);
   }
+  // Refusing before stdin is read must not surface as a write error (EPIPE): 4 MiB overfills
+  // the pipe, so the write always outlasts the script.
+  const early = run("x".repeat(4 * 1024 * 1024), { HOME: "/no-such-home/check\nhome" });
+  assert.equal(early.status, 1);
+  assert.match(early.stderr, /must not contain newlines/);
   const target = path.join(tmp, "target\n");
   const alias = path.join(tmp, "newline-alias");
   fs.mkdirSync(target);

@@ -26,7 +26,9 @@ const envFor = (env) => {
 };
 const run = (diff, env = {}, { args = [], cwd = tmp } = {}) => {
   const r = spawnSync("bash", [script, ...args], { input: diff, cwd, encoding: "utf8", env: envFor(env) });
-  assert.ifError(r.error);
+  // A check that refuses before reading stdin can exit before the write finishes; the exit
+  // status and stderr are still complete, and the callers assert on those.
+  if (r.error?.code !== "EPIPE") assert.ifError(r.error);
   return { status: r.status, stderr: r.stderr };
 };
 // Runs a command in a directory; returns { status, out } with stdout and stderr together.
