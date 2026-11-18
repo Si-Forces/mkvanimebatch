@@ -7,18 +7,25 @@
 #
 # Usage:
 #   home-path.sh                     checks a git unified or combined diff on stdin
-#   home-path.sh --staged            checks the staged diff, so an unstaged edit can neither
-#                                    hide nor fake a hit
+#   home-path.sh --staged            checks the staged diff and added/renamed filenames
 #   home-path.sh --published <old> <new> [remote]
-#                                    checks each commit in old..new, including fetched ones.
-#                                    Both ids are full; old=0 means a new ref. For a new ref,
-#                                    only that remote's main is a trusted baseline, if known;
-#                                    otherwise all reachable history is checked. A merge
-#                                    counts for lines its resolution adds, which no parent has.
-# Prints the file and line number of each hit, redacting recognized home spellings from the
-# file name, and exits 1, else exits 0. Not the line's text: gate output gets pasted into PR
-# descriptions, which agents publish through scripts/pr-publish.js.
-# Run by pre-commit, pre-push and scripts/jj-gate.sh; not a hook itself.
+#                                    checks each commit in old..new, including fetched ones,
+#                                    commit/tag messages and headers, added filenames, nested
+#                                    tag annotations and binary merge resolutions. Both ids are
+#                                    full; old=0 means a new ref. For a new ref, only that
+#                                    remote's main is a trusted baseline (when fetch/push URLs
+#                                    match); otherwise all reachable history is checked.
+#   home-path.sh --between <base> <tip>
+#                                    checks the two-commit content diff and added/renamed names
+#   home-path.sh --ref               checks a full destination ref name read from stdin
+#   home-path.sh --text <message|tag-message|pr-body>
+#                                    checks raw lines from stdin under the given report label
+#   home-path.sh --records           internal: checks octal-encoded records from home-path-input.js
+#   home-path.sh --probe             internal: answers 0/1 match queries on octal lines from stdin
+# Prints the file and line number (or safe metadata label) of each hit, redacting recognized
+# home spellings from file and ref names, and exits 1, else exits 0. Never prints matched text:
+# gate output gets pasted into PR descriptions, checked through scripts/pr-publish.js.
+# Run by commit-msg, pre-commit, pre-push, scripts/jj-gate.sh and scripts/pr-publish.js; not a hook itself.
 set -euo pipefail
 
 usage() {
@@ -45,12 +52,13 @@ USAGE
 # own errors are dropped: they could print a path that holds the home. NUL bytes are removed
 # in every mode (--text prints the ones a file holds).
 diff_flags=(-U0 --text --no-color --no-relative --no-ext-diff --no-textconv
-  --src-prefix=a/ --dst-prefix=b/ -O/dev/null --ignore-submodules=none)
+  --src-prefix=a/ --dst-prefix=b/ -O/dev/null --ignore-submodules=none
+  --submodule=short --find-renames=100%)
 mode=${1:-}
-input_kind="" input_label=""
+input_kind="" input_label="" no_baseline=0
 case $mode in
-  --between | --ref)
-    if node "$(dirname "$0")/../home-path-input.js" "${mode#--}" "${@:2}" 2> /dev/null |
+  --ref)
+    if node "$(dirname "$0")/../home-path-input.js" ref "${@:2}" 2> /dev/null |
       "$0" --records; then exit 0; else
       extra_status=("${PIPESTATUS[@]}")
       if [ "${extra_status[0]}" -ne 0 ]; then echo "❌ [home-path] cannot inspect publication input safely." >&2; fi
@@ -83,7 +91,12 @@ case $mode in
       fi
     fi
     [ -z "$old" ] || exclude=(--not "$old")
+    [ -n "$old" ] || no_baseline=1
     ;;
+  --between)
+    [ $# -eq 3 ] &&
+      [[ $2 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ && $3 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || usage
+    base=$2 tip=$3 ;;
   --staged)
     [ $# -eq 1 ] || usage
     ;;
@@ -104,6 +117,9 @@ read_diff() {
       GIT_GRAFT_FILE=/dev/null git --no-replace-objects log -p --root -c "${diff_flags[@]}" \
         --format='commit %H' "$new" "${exclude[@]}" 2> /dev/null ||
         { echo "❌ [home-path] cannot list the commits to check (git log says why)." >&2; return 1; } ;;
+    --between)
+      GIT_GRAFT_FILE=/dev/null git --no-replace-objects diff "${diff_flags[@]}" "$base" "$tip" 2> /dev/null ||
+        { echo "❌ [home-path] cannot read the diff between commits (git diff says why)." >&2; return 1; } ;;
     --staged)
       # A replace ref on HEAD could stand a tree that already holds the line in for the one
       # the commit extends.
@@ -227,7 +243,7 @@ if (homes.some(p => p.includes("\ufffd"))) process.exit(1);
 process.stdout.write(homes.map(p => p.replace(/[^A-Za-z0-9]/g, "-")).join("\n"));
 ' -- "${identity_forms[@]}" 2> /dev/null) ||
   { echo "❌ [home-path] cannot derive home spellings (Node and valid Unicode identities are required)." >&2; exit 1; }
-if [ -z "$home$real$profile" ] && [[ $mode != --staged && $mode != --published ]]; then
+if [ -z "$home$real$profile" ] && [[ $mode != --staged && $mode != --published && $mode != --between ]]; then
   echo "⚠  [home-path] HOME and USERPROFILE name no home directory (unset, /, a drive alone," \
     "or one segment such as /root), so nothing is checked." >&2
 fi
@@ -236,6 +252,12 @@ extra_fail=0 extra_error=0
 case $mode in
   --staged)
     if node "$(dirname "$0")/../home-path-input.js" staged 2> /dev/null | "$0" --records; then :; else
+      extra_status=("${PIPESTATUS[@]}"); extra_fail=1
+      [ "${extra_status[0]}" -eq 0 ] || extra_error=1
+    fi ;;
+  --between)
+    if node "$(dirname "$0")/../home-path-input.js" between "$base" "$tip" 2> /dev/null |
+      "$0" --records; then :; else
       extra_status=("${PIPESTATUS[@]}"); extra_fail=1
       [ "${extra_status[0]}" -eq 0 ] || extra_error=1
     fi ;;
@@ -260,6 +282,11 @@ out_fd=2
 # Probe records are already NUL-free; tr would buffer a request awaiting its response.
 nul_filter() {
   if [ "$input_kind" = probe ]; then cat; else LC_ALL=C tr -d '\0'; fi
+}
+print_no_baseline_hint() {
+  [ "$no_baseline" -eq 1 ] || return 0
+  echo "   No trusted baseline was found, so all history was checked; push via a named remote" \
+    "and fetch its main (with matching fetch and push URLs) to exclude already-published history." >&2
 }
 if read_diff | nul_filter | HOMES="$homes" DASHED="$dashed" INPUT_KIND="$input_kind" INPUT_LABEL="$input_label" LC_ALL=C awk '
   # name is what the character after h must not be; lead, when set, the one before it.
@@ -446,13 +473,20 @@ if read_diff | nul_filter | HOMES="$homes" DASHED="$dashed" INPUT_KIND="$input_k
     }
   }
 ' >&"$out_fd"; then
-  if [ "$extra_error" -ne 0 ]; then echo "❌ [home-path] cannot inspect publication input safely." >&2; fi
+  if [ "$extra_error" -ne 0 ]; then
+    echo "❌ [home-path] cannot inspect publication input safely." >&2
+  elif [ "$extra_fail" -ne 0 ]; then
+    print_no_baseline_hint
+  fi
   exit "$extra_fail"
 else
   statuses=("${PIPESTATUS[@]}")
   # awk uses 1 for findings; producer/tr failures and awk errors also refuse.
   if [ "${statuses[1]}" -ne 0 ] || [ "${statuses[2]}" -gt 1 ]; then
     echo "❌ [home-path] cannot scan the diff." >&2
+  elif { [ "${statuses[1]}" -eq 0 ] && [ "${statuses[2]}" -eq 1 ]; } ||
+       { [ "$extra_fail" -ne 0 ] && [ "$extra_error" -eq 0 ]; }; then
+    print_no_baseline_hint
   fi
   exit 1
 fi

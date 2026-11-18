@@ -287,7 +287,27 @@ jobs:
         with:
           node-version: "22"
 
+      # Pin jj to v0.46.0 with a SHA-256 check; taiki-e/install-action has no jj manifest and
+      # its cargo-binstall fallback for `jj` resolves an unrelated placeholder crate.
+      - name: Install jj
+        shell: bash
+        run: |
+          jj_dir="$RUNNER_TEMP/jj-v0.46.0"
+          mkdir -p "$jj_dir"
+          curl --retry 3 -fsSL -o "$jj_dir/jj.tar.gz" \
+            "https://github.com/jj-vcs/jj/releases/download/v0.46.0/jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz"
+          printf '%s  %s\n' \
+            "fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08" \
+            "$jj_dir/jj.tar.gz" | sha256sum -c -
+          tar -xzf "$jj_dir/jj.tar.gz" -C "$jj_dir"
+          rm -f "$jj_dir/jj.tar.gz"
+          test -x "$jj_dir/jj"
+          printf '%s\n' "$jj_dir" >> "$GITHUB_PATH"
+          "$jj_dir/jj" --version
+
       - name: Run UI syntax checks and the UI and script tests
+        env:
+          MKV_REQUIRE_JJ: "1"
         run: |
           node --check desktop-tauri/ui/app.js
           node --test scripts/*.test.js desktop-tauri/ui/*.test.js

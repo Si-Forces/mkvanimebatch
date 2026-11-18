@@ -54,6 +54,13 @@ test("PR publication uses its snapshot after the source changes and hides scanne
   fs.writeFileSync(original, "clean\n");
   const ghError = invoke({ FAIL_GH: "1" });
   assert.equal(ghError.status, 1); assert.ok(!ghError.out.includes(home));
+  fs.unlinkSync(called);
+  fs.writeFileSync(path.join(bin, "bash"), '#!/bin/sh\nexec 0<&-\nexit 0\n');
+  fs.chmodSync(path.join(bin, "bash"), 0o755);
+  fs.writeFileSync(original, "clean line\n".repeat(65536));
+  const brokenPipe = invoke({});
+  assert.equal(brokenPipe.status, 1, brokenPipe.out);
+  assert.equal(fs.existsSync(called), false);
 });
 
 test("PR creation requires nonblank explicit title and head before any publisher call", () => {

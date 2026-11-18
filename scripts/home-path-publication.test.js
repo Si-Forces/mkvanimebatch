@@ -481,3 +481,370 @@ test("metadata entrypoint resolution errors refuse without exposing invocation p
   assert.equal(r.status, 1, r.out); assert.match(r.out, /cannot inspect publication input safely/);
   assert.ok(!r.out.includes(home));
 });
+
+test("--staged, --published and --between allow 100% pure renames under diff.renames=false while refusing edited renames and home-bearing names", () => {
+  const { dir, git, commit } = gitRepo("between-rename", { hostile: true });
+  fs.appendFileSync(path.join(dir, ".gitattributes"), "*.bin -diff\n");
+  git("config", "diff.renames", "false");
+  const contextLines = Array.from({ length: 25 }, (_, i) => `clean-line-${i}`).join("\n");
+  fs.writeFileSync(path.join(dir, "a.txt"), `${home}/existing\n${contextLines}\n`);
+  fs.writeFileSync(path.join(dir, "a.bin"), `x\0y\n${home}/existing-bin\n`);
+  const base = commit("seed\n");
+  git("mv", "a.txt", "b.txt");
+  git("mv", "a.bin", "b.bin");
+  assert.deepEqual(run("", {}, { cwd: dir, args: ["--staged"] }), { status: 0, stderr: "" });
+  git("commit", "-qm", "pure rename");
+  const renamed = git("rev-parse", "HEAD");
+  const startup = path.join(tmp, "between-graft-check.bash");
+  fs.writeFileSync(startup, [
+    'git() {',
+    '  if [ "${1:-}" = --no-replace-objects ] && [ "${2:-}" = diff ]; then',
+    '    [ "${GIT_GRAFT_FILE:-}" = /dev/null ] || return 1',
+    '  fi',
+    '  command git "$@"',
+    '}',
+    '',
+  ].join("\n"));
+  assert.deepEqual(run("", { BASH_ENV: startup }, { cwd: dir, args: ["--between", base, renamed] }), { status: 0, stderr: "" });
+  assert.deepEqual(run("", {}, { cwd: dir, args: publishedArgs(renamed, base) }), { status: 0, stderr: "" });
+
+  // An edited rename (~96% similar, keeping the home-bearing line) must refuse in every mode.
+  git("mv", "b.txt", "c.txt");
+  fs.appendFileSync(path.join(dir, "c.txt"), "edited\n");
+  git("add", "c.txt");
+  assert.equal(run("", {}, { cwd: dir, args: ["--staged"] }).status, 1);
+  git("commit", "-qm", "edited rename");
+  const editedRename = git("rev-parse", "HEAD");
+  assert.equal(run("", {}, { cwd: dir, args: ["--between", renamed, editedRename] }).status, 1);
+  assert.equal(run("", {}, { cwd: dir, args: publishedArgs(editedRename, renamed) }).status, 1);
+
+  const dirtyName = path.join(home.slice(1), "renamed.txt");
+  fs.mkdirSync(path.dirname(path.join(dir, dirtyName)), { recursive: true });
+  git("mv", "c.txt", dirtyName);
+  git("commit", "-qm", "rename to home path");
+  const badName = git("rev-parse", "HEAD");
+  const refused = run("", {}, { cwd: dir, args: ["--between", base, badName] });
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /:filename/);
+  assert.ok(!refused.stderr.includes(home), refused.stderr);
+});
+
+test("published commits refuse a mergetag header containing the home directory", () => {
+  const { dir, git, commit } = gitRepo("mergetag-header");
+  const base = commit("clean\n");
+  const tree = git("rev-parse", "HEAD^{tree}");
+  const raw = [
+    `tree ${tree}`,
+    `parent ${base}`,
+    "author t <t@example.com> 1700000000 +0000",
+    "committer t <t@example.com> 1700000000 +0000",
+    `mergetag object ${base}`,
+    " type commit",
+    " tag signed-v1",
+    " tagger t <t@example.com> 1700000000 +0000",
+    " ",
+    ` ${home}/from-mergetag`,
+    " -----BEGIN PGP SIGNATURE-----",
+    " fixture",
+    " -----END PGP SIGNATURE-----",
+    "",
+    "clean merge body",
+    "",
+  ].join("\n");
+  const object = spawnSync("git", ["hash-object", "-t", "commit", "-w", "--stdin"], {
+    cwd: dir, input: raw, encoding: "utf8", env: envFor({}),
+  });
+  assert.ifError(object.error);
+  assert.equal(object.status, 0, object.stderr);
+  const tip = object.stdout.trim();
+  const r = run("", {}, { cwd: dir, args: publishedArgs(tip, base) });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, new RegExp(`${tip.slice(0, 12)} header:10\\n`));
+  assert.ok(!r.stderr.includes(home), r.stderr);
+});
+
+test("jj gpush decodes quoted non-ASCII destination names and fails closed on undecodable escapes", { skip: !hasJj }, () => {
+  const cafeHome = path.join(tmp, "café");
+  fs.mkdirSync(cafeHome, { recursive: true });
+  const { dir, git, commit } = gitRepo("jj-quoted-names");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  commit("clean\n");
+  const remote = path.join(tmp, "jj-quoted-names.git");
+  git("init", "-q", "--bare", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "main");
+  const tip = commit("clean advance\n");
+  const config = path.join(tmp, "jj-quoted-names.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@origin"\n');
+  const env = { JJ_CONFIG: config, HOME: cafeHome };
+  const jj = (...args) => { const r = sh(dir, "jj", ["--color", "never", ...args], env); assert.equal(r.status, 0, r.out); return r.out.trim(); };
+  jj("git", "init", "--colocate");
+  const bad = cafeHome.slice(1) + "/topic";
+  jj("bookmark", "create", `"${bad}"`, "-r", `commit_id(${tip})`);
+  const bmRefused = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "-b", `"${bad}"`], { ...env, ...SKIP });
+  assert.equal(bmRefused.status, 1, bmRefused.out);
+  assert.match(bmRefused.out, /:ref/);
+  assert.ok(!bmRefused.out.includes(cafeHome), bmRefused.out);
+  assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", `refs/heads/${bad}`]).status, 0);
+
+  jj("tag", "set", `"${bad}"`, "-r", `commit_id(${tip})`);
+  const tagRefused = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--tag", `"${bad}"`], { ...env, ...SKIP });
+  assert.equal(tagRefused.status, 1, tagRefused.out);
+  assert.match(tagRefused.out, /:ref/);
+  assert.ok(!tagRefused.out.includes(cafeHome), tagRefused.out);
+  assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", `refs/tags/${bad}`]).status, 0);
+
+  const realJj = sh(dir, "bash", ["-c", "command -v jj"]).out.trim();
+  const bin = path.join(tmp, "jj-escape-bin");
+  fs.mkdirSync(bin);
+  const marker = path.join(tmp, "jj-escape-pushed");
+  fs.writeFileSync(path.join(bin, "jj"), [
+    '#!/usr/bin/env bash',
+    'case " $* " in',
+    '  *" git push --dry-run "*) printf "%s\\n" "$PLAN"; exit 0 ;;',
+    '  *" git push "*) touch "$PUSH_MARKER"; exit 99 ;;',
+    'esac',
+    'exec "$REAL_JJ" "$@"',
+    '',
+  ].join("\n"));
+  fs.chmodSync(path.join(bin, "jj"), 0o755);
+  for (const badQuoted of ['"bad\\u1234"', '"nul\\x00"', '"nul\\0"', '"mid"quote"', '"unterminated\\"']) {
+    const plan = `Changes to push to origin:\n  bookmark: ${badQuoted} [add to ${tip.slice(0, 12)}]`;
+    const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push"], {
+      ...env, PATH: bin + path.delimiter + process.env.PATH, PLAN: plan, PUSH_MARKER: marker, REAL_JJ: realJj,
+    });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /cannot decode destination name in the push plan safely/);
+    assert.equal(fs.existsSync(marker), false);
+  }
+});
+
+test("jj-gate decode_jj_name decodes quote and backslash escapes and fails closed on control or unknown escapes", () => {
+  const gateScript = path.join(path.dirname(script), "..", "jj-gate.sh");
+  const decode = (raw) => spawnSync("bash", [gateScript, "--decode-name", raw], { cwd: tmp, encoding: "utf8", env: envFor({}) });
+  for (const [raw, expected] of [
+    ["plain/topic", "plain/topic"],
+    ['"tmp/x/café/topic"', "tmp/x/café/topic"],
+    ['"x\\"y\\\\z"', 'x"y\\z'],
+    ['"\\"quoted\\""', '"quoted"'],
+  ]) {
+    const r = decode(raw);
+    assert.equal(r.status, 0, `${raw}: ${r.stderr}`);
+    assert.equal(r.stdout, expected, raw);
+  }
+  for (const invalid of [
+    "",
+    '""',
+    '"a\\tb"',
+    '"a\\rb"',
+    '"a\\nb"',
+    '"a\\eb"',
+    '"\\x41"',
+    '"bad\\u1234"',
+    '"bad\\z"',
+    '"nul\\x00"',
+    '"nul\\0"',
+    '"mid"quote"',
+    '"trailing\\"',
+    '"unclosed\\',
+    'unquoted"quote',
+  ]) {
+    const r = decode(invalid);
+    assert.equal(r.status, 1, `${invalid} must fail closed`);
+  }
+});
+
+test("jj gpush checks annotated tag objects, refuses git.sign-on-push, decodes quoted remotes, and pushes quoted bookmark names", { skip: !hasJj }, () => {
+  const { dir, git, commit } = gitRepo("jj-tag-sign-remote");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  const base = commit("clean base\n");
+  const remote = path.join(tmp, "jj-tag-sign-remote.git");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("remote", "add", "café", remote);
+  git("push", "-q", "café", "main");
+  const leak = commit(`${home}/public-on-cafe\n`);
+  git("push", "--no-verify", "-q", "café", `${leak}:refs/heads/main`);
+  git("fetch", "-q", "café");
+  const tip = commit("clean advance\n");
+  const config = path.join(tmp, "jj-tag-sign-remote.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@café"\n');
+  const env = { JJ_CONFIG: config };
+  const jj = (...args) => { const r = sh(dir, "jj", ["--color", "never", ...args], env); assert.equal(r.status, 0, r.out); return r.out.trim(); };
+  jj("git", "init", "--colocate");
+
+  // 1. Annotated tag with home path in tagger header must refuse and leave remote absent.
+  sh(dir, "git", ["tag", "-a", "bad-tag", "-m", "clean tag message", tip], { GIT_COMMITTER_NAME: `${home}/tagger` });
+  jj("log", "-r", "@", "--no-graph", "-T", "''");
+  const badTag = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--remote", '"café"', "--tag", "bad-tag"], { ...env, ...SKIP });
+  assert.equal(badTag.status, 1, badTag.out);
+  assert.match(badTag.out, /header:[0-9]+/);
+  assert.ok(!badTag.out.includes(home), badTag.out);
+  assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", "refs/tags/bad-tag"]).status, 0);
+
+  // Clean annotated tag passes and reaches the remote.
+  git("tag", "-a", "good-tag", "-m", "clean tag message", tip);
+  jj("log", "-r", "@", "--no-graph", "-T", "''");
+  const goodTag = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--remote", '"café"', "--tag", "good-tag"], { ...env, ...SKIP });
+  assert.equal(goodTag.status, 0, goodTag.out);
+  assert.equal(git("--git-dir", remote, "rev-parse", "refs/tags/good-tag"), git("rev-parse", "refs/tags/good-tag"));
+
+  // 7 + 9. Quoted remote "café" supplies trusted baseline refs/remotes/café/main, and real bookmark x"y pushes cleanly.
+  jj("bookmark", "create", '"x\\"y"', "-r", `commit_id(${tip})`);
+  const quotePush = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--remote", '"café"', "-b", '"x\\"y"'], { ...env, ...SKIP });
+  assert.equal(quotePush.status, 0, quotePush.out);
+  assert.equal(git("--git-dir", remote, "rev-parse", 'refs/heads/x"y'), tip);
+
+  // 2. git.sign-on-push=true refuses before pushing.
+  jj("bookmark", "create", "unsigned", "-r", `commit_id(${tip})`);
+  jj("config", "set", "--repo", "git.sign-on-push", "true");
+  const signedRefused = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--remote", '"café"', "-b", "unsigned"], { ...env, ...SKIP });
+  assert.equal(signedRefused.status, 1, signedRefused.out);
+  assert.match(signedRefused.out, /git\.sign-on-push/);
+  assert.match(signedRefused.out, /jj sign/);
+  assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", "refs/heads/unsigned"]).status, 0);
+});
+
+test("jj refuses to push when an annotated tag object is replaced while the gates run", { skip: !hasJj }, () => {
+  const { dir, git, commit } = gitRepo("jj-tag-swapped");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  const base = commit("clean base\n");
+  const remote = path.join(tmp, "jj-tag-swapped.git");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "main");
+  const tip = commit("clean tip\n");
+  git("tag", "-a", "swapped-tag", "-m", "clean tag message", tip);
+  assert.equal(sh(dir, "bash", ["scripts/review-gate.sh", "record-range", base, tip, "fixture review"]).status, 0);
+  const config = path.join(tmp, "jj-tag-swapped.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@origin"\n');
+  const env = { JJ_CONFIG: config };
+  assert.equal(sh(dir, "jj", ["git", "init", "--colocate"], env).status, 0);
+
+  const bin = path.join(tmp, "jj-tag-swapped-bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "cargo"), '#!/usr/bin/env bash\ngit tag -fa swapped-tag -m "$HOME/swapped" "$TIP"\n');
+  fs.writeFileSync(path.join(bin, "node"), '#!/usr/bin/env bash\nif [ "$1" = --test ]; then exit 0; fi\nexec "$REAL_NODE" "$@"\n');
+  for (const file of ["cargo", "node"]) fs.chmodSync(path.join(bin, file), 0o755);
+
+  const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--tag", "swapped-tag"], {
+    ...env, PATH: bin + path.delimiter + process.env.PATH, REAL_NODE: process.execPath, TIP: tip,
+  });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /the push plan changed while the gates ran/);
+  assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", "refs/tags/swapped-tag"]).status, 0);
+});
+
+test("jj refuses command-line --config and --config-file overrides on gpush", { skip: !hasJj }, () => {
+  const { dir, git, commit } = gitRepo("jj-cli-config");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  commit("clean base\n");
+  const remote = path.join(tmp, "jj-cli-config.git");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "main");
+  const tip = commit("clean tip\n");
+  const config = path.join(tmp, "jj-cli-config.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@origin"\n');
+  const overrideToml = path.join(tmp, "jj-cli-override.toml");
+  fs.writeFileSync(overrideToml, "[git]\nsign-on-push = true\n");
+  const env = { JJ_CONFIG: config };
+  const jj = (...args) => { const r = sh(dir, "jj", ["--color", "never", ...args], env); assert.equal(r.status, 0, r.out); };
+  jj("git", "init", "--colocate");
+  jj("bookmark", "create", "topic", "-r", `commit_id(${tip})`);
+
+  for (const flags of [
+    ["--config", "git.sign-on-push=true"],
+    ["--config=git.sign-on-push=true"],
+    ["--config-file", overrideToml],
+    [`--config-file=${overrideToml}`],
+  ]) {
+    const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push", ...flags, "-b", "topic"], { ...env, ...SKIP });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /config overrides on the command line are not allowed/);
+    assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", "refs/heads/topic"]).status, 0);
+  }
+  for (const flags of [
+    ["-R", tmp],
+    [`-R${tmp}`],
+    ["--repository", tmp],
+    [`--repository=${tmp}`],
+    ["--at-operation", "@"],
+    ["--at-operation=@"],
+    ["--at-op", "@"],
+    ["--at-op=@"],
+  ]) {
+    const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push", ...flags, "-b", "topic"], { ...env, ...SKIP });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /repository and operation overrides on the command line are not allowed/);
+    assert.notEqual(sh(dir, "git", ["--git-dir", remote, "show-ref", "--verify", "refs/heads/topic"]).status, 0);
+  }
+});
+
+test("jj refuses when a tag ref does not peel to the planned commit", { skip: !hasJj }, () => {
+  const { dir, git, commit } = gitRepo("jj-tag-peel-mismatch");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  const base = commit("clean base\n");
+  const remote = path.join(tmp, "jj-tag-peel-mismatch.git");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "main");
+  const tip = commit("clean tip\n");
+  git("tag", "-a", "mismatch-tag", "-m", "clean tag", base);
+  const config = path.join(tmp, "jj-tag-peel-mismatch.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@origin"\n');
+  const env = { JJ_CONFIG: config };
+  assert.equal(sh(dir, "jj", ["git", "init", "--colocate"], env).status, 0);
+
+  const realJj = sh(dir, "bash", ["-c", "command -v jj"]).out.trim();
+  const bin = path.join(tmp, "jj-tag-mismatch-bin");
+  fs.mkdirSync(bin);
+  const marker = path.join(tmp, "jj-tag-mismatch-pushed");
+  fs.writeFileSync(path.join(bin, "jj"), [
+    '#!/usr/bin/env bash',
+    'case " $* " in',
+    '  *" git push --dry-run "*) printf "%s\\n" "$PLAN"; exit 0 ;;',
+    '  *" git push "*) touch "$PUSH_MARKER"; exit 99 ;;',
+    'esac',
+    'exec "$REAL_JJ" "$@"',
+    '',
+  ].join("\n"));
+  fs.chmodSync(path.join(bin, "jj"), 0o755);
+  const plan = `Changes to push to origin:\n  tag: mismatch-tag [add to ${tip.slice(0, 12)}]`;
+  const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "--tag", "mismatch-tag"], {
+    ...env, ...SKIP, PATH: bin + path.delimiter + process.env.PATH, PLAN: plan, PUSH_MARKER: marker, REAL_JJ: realJj,
+  });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /tag object does not match the planned commit/);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("jj pins git.sign-on-push=false for the push even when JJ_CONFIG enables it during the gates", { skip: !hasJj }, () => {
+  const { dir, git, commit } = gitRepo("jj-pin-sign-off");
+  copyScripts(dir, ["scripts/jj-gate.sh", "scripts/hooks/home-path.sh", "scripts/hooks/commit-msg", "scripts/review-gate.sh"]);
+  const base = commit("clean base\n");
+  const remote = path.join(tmp, "jj-pin-sign-off.git");
+  git("init", "-q", "--bare", "-b", "main", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "main");
+  const tip = commit("clean tip\n");
+  assert.equal(sh(dir, "bash", ["scripts/review-gate.sh", "record-range", base, tip, "fixture review"]).status, 0);
+  const config = path.join(tmp, "jj-pin-sign-off.toml");
+  fs.writeFileSync(config, '[user]\nname="t"\nemail="t@example.com"\n[revset-aliases]\n"trunk()"="main@origin"\n[signing]\nbehavior = "keep"\nbackend = "ssh"\n');
+  const env = { JJ_CONFIG: config };
+  const jj = (...args) => { const r = sh(dir, "jj", ["--color", "never", ...args], env); assert.equal(r.status, 0, r.out); };
+  jj("git", "init", "--colocate");
+  jj("bookmark", "create", "topic", "-r", `commit_id(${tip})`);
+
+  const bin = path.join(tmp, "jj-pin-sign-off-bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "cargo"), '#!/usr/bin/env bash\nprintf "\\n[git]\\nsign-on-push = true\\n" >> "$JJ_CONFIG"\n');
+  fs.writeFileSync(path.join(bin, "node"), '#!/usr/bin/env bash\nif [ "$1" = --test ]; then exit 0; fi\nexec "$REAL_NODE" "$@"\n');
+  for (const file of ["cargo", "node"]) fs.chmodSync(path.join(bin, file), 0o755);
+
+  const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "-b", "topic"], {
+    ...env, PATH: bin + path.delimiter + process.env.PATH, REAL_NODE: process.execPath,
+  });
+  assert.equal(r.status, 0, r.out);
+  assert.equal(git("--git-dir", remote, "rev-parse", "refs/heads/topic"), tip);
+  assert.doesNotMatch(git("--git-dir", remote, "cat-file", "commit", "refs/heads/topic"), /^gpgsig /m);
+});

@@ -115,3 +115,27 @@ test("jj's printed parent remedy runs the suites even when a merge tree equals t
   assert.deepEqual(f.checks(), ["cargo test --workspace", "node tests"]);
   assert.equal(f.remoteTip("parent-0").out.trim(), f.parents[0]);
 });
+
+test("jj refuses to push when the push plan changes while the gates run", options, () => {
+  const f = fixture("plan-changed", { merge: false, dirty: false });
+  const bin = path.join(tmp, "plan-changed-override-bin");
+  const log = path.join(tmp, "plan-changed-override-checks");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "cargo"), [
+    '#!/usr/bin/env bash',
+    'printf "cargo %s\\n" "$*" >> "$GATE_CHECKS"',
+    'jj --ignore-working-copy bookmark set --allow-backwards parent-0 -r "commit_id($ALT_TARGET)"',
+    '',
+  ].join("\n"));
+  fs.writeFileSync(path.join(bin, "node"), '#!/usr/bin/env bash\nif [ "$1" = --test ]; then exit 0; fi\nexec "$REAL_NODE" "$@"\n');
+  for (const file of ["cargo", "node"]) fs.chmodSync(path.join(bin, file), 0o755);
+  const dir = path.join(tmp, "plan-changed");
+  const config = path.join(tmp, "plan-changed.toml");
+  const r = sh(dir, "bash", ["scripts/jj-gate.sh", "push", "-b", "parent-0"], {
+    JJ_CONFIG: config, PATH: bin + path.delimiter + process.env.PATH,
+    GATE_CHECKS: log, REAL_NODE: process.execPath, ALT_TARGET: f.base,
+  });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /the push plan changed while the gates ran/);
+  assert.notEqual(f.remoteTip("parent-0").status, 0);
+});

@@ -249,3 +249,108 @@ test("jj-gate.sh check and push (jj gate, jj gpush) refuse a leak", { skip: !has
   assert.equal(existingPush.status, 0, existingPush.out);
   assert.equal(git("--git-dir", existingRepo, "rev-parse", "refs/heads/topic"), tip);
 });
+
+test("MKV_REQUIRE_JJ=1 fails when jj is missing instead of silently skipping", () => {
+  const emptyBin = path.join(tmp, "no-jj-bin");
+  fs.mkdirSync(emptyBin);
+  const r = sh(tmp, process.execPath, ["--input-type=module", "-e",
+    `import ${JSON.stringify(new URL("./test-support/home-path.js", import.meta.url).href)};`], {
+    PATH: emptyBin, MKV_REQUIRE_JJ: "1",
+  });
+  assert.notEqual(r.status, 0);
+  assert.match(r.out, /MKV_REQUIRE_JJ=1 requires jj to be installed/);
+});
+
+test("pre-commit and pre-push dirty-tree diagnostics never echo untracked home-bearing filenames", () => {
+  const { dir, git, commit } = gitRepo("safe-dirty-diagnostics");
+  commit("clean\n");
+  const remote = path.join(tmp, "safe-dirty-diagnostics.git");
+  git("init", "-q", "--bare", remote);
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "main");
+  git("config", "core.hooksPath", path.dirname(script));
+
+  fs.writeFileSync(path.join(dir, "clean.rs"), "fn main() {}\n");
+  git("add", "clean.rs");
+  const dirtyRs = path.join(dir, "x" + home.slice(1), "a.rs");
+  fs.mkdirSync(path.dirname(dirtyRs), { recursive: true });
+  fs.writeFileSync(dirtyRs, "fn secret() {}\n");
+  const preCommit = sh(dir, "git", ["commit", "-q", "-m", "clean staged"]);
+  assert.equal(preCommit.status, 1, preCommit.out);
+  assert.match(preCommit.out, /Rust\/Cargo files differ from the index/);
+  assert.match(preCommit.out, /1 unstaged\/untracked file\(s\)/);
+  assert.ok(!preCommit.out.includes(home), preCommit.out);
+  assert.ok(!preCommit.out.includes(path.basename(home)), preCommit.out);
+
+  fs.rmSync(path.join(dir, "x" + home.slice(1).split("/")[0]), { recursive: true, force: true });
+  git("commit", "--no-verify", "-q", "-m", "clean staged");
+  const dirtyScript = path.join(dir, "scripts", home.slice(1), "a.rs");
+  fs.mkdirSync(path.dirname(dirtyScript), { recursive: true });
+  fs.writeFileSync(dirtyScript, "fn secret() {}\n");
+  const prePush = sh(dir, "git", ["push", "-q", "origin", "main"], { SKIP_REVIEW_GATE: "1" });
+  assert.equal(prePush.status, 1, prePush.out);
+  assert.match(prePush.out, /the working tree differs from HEAD/);
+  assert.match(prePush.out, /1 modified\/untracked file\(s\)/);
+  assert.ok(!prePush.out.includes(home), prePush.out);
+  assert.ok(!prePush.out.includes(path.basename(home)), prePush.out);
+
+  fs.rmSync(path.join(dir, "scripts"), { recursive: true, force: true });
+  const hiddenRel = path.join("x" + home.slice(1), "hidden.rs").split(path.sep).join("/");
+  const hiddenAbs = path.join(dir, hiddenRel);
+  fs.mkdirSync(path.dirname(hiddenAbs), { recursive: true });
+  fs.writeFileSync(hiddenAbs, "fn a() {}\n");
+  git("add", hiddenRel);
+  git("commit", "--no-verify", "-q", "-m", "tracked hidden");
+  git("update-index", "--assume-unchanged", hiddenRel);
+  fs.writeFileSync(path.join(dir, "clean.rs"), "fn main() { /* v2 */ }\n");
+  git("add", "clean.rs");
+  fs.writeFileSync(hiddenAbs, "fn a() { /* modified */ }\n");
+  const hiddenChanged = sh(dir, "git", ["commit", "-q", "-m", "hidden edit"]);
+  assert.equal(hiddenChanged.status, 1, hiddenChanged.out);
+  assert.match(hiddenChanged.out, /1 file\(s\) differ from the index/);
+  assert.match(hiddenChanged.out, /List flagged files with: git ls-files -v \| grep -E '\^\(\[a-z\]\|S\) '/);
+  assert.ok(!hiddenChanged.out.includes(home), hiddenChanged.out);
+  assert.ok(!hiddenChanged.out.includes(path.basename(home)), hiddenChanged.out);
+
+  fs.unlinkSync(hiddenAbs);
+  const hiddenMissing = sh(dir, "git", ["commit", "-q", "-m", "hidden missing"]);
+  assert.equal(hiddenMissing.status, 1, hiddenMissing.out);
+  assert.match(hiddenMissing.out, /1 flagged file\(s\) are missing from the working tree/);
+  assert.match(hiddenMissing.out, /List flagged files with: git ls-files -v \| grep -E '\^\(\[a-z\]\|S\) '/);
+  assert.ok(!hiddenMissing.out.includes(home), hiddenMissing.out);
+  assert.ok(!hiddenMissing.out.includes(path.basename(home)), hiddenMissing.out);
+
+  // A newline inside a flagged filename counts as 1 file, not 2.
+  git("update-index", "--no-assume-unchanged", hiddenRel);
+  fs.writeFileSync(hiddenAbs, "fn a() {}\n");
+  const newlineRel = path.join("x" + home.slice(1), "line1\nline2.rs").split(path.sep).join("/");
+  const newlineAbs = path.join(dir, newlineRel);
+  fs.writeFileSync(newlineAbs, "fn nl() {}\n");
+  git("add", newlineRel);
+  git("commit", "--no-verify", "-q", "-m", "newline filename");
+  git("update-index", "--assume-unchanged", newlineRel);
+  fs.writeFileSync(path.join(dir, "clean.rs"), "fn main() { /* v2b */ }\n");
+  git("add", "clean.rs");
+  fs.writeFileSync(newlineAbs, "fn nl() { /* modified */ }\n");
+  const newlineChanged = sh(dir, "git", ["commit", "-q", "-m", "newline hidden edit"]);
+  assert.equal(newlineChanged.status, 1, newlineChanged.out);
+  assert.match(newlineChanged.out, /1 file\(s\) differ from the index/);
+  assert.ok(!newlineChanged.out.includes(home), newlineChanged.out);
+
+  // A failing git hash-object (e.g. failing required clean filter) fails closed without echoing paths.
+  git("update-index", "--no-assume-unchanged", newlineRel);
+  fs.writeFileSync(newlineAbs, "fn nl() {}\n");
+  fs.writeFileSync(path.join(dir, ".gitattributes"), "hidden.rs filter=badclean\n");
+  git("add", ".gitattributes");
+  git("commit", "--no-verify", "-q", "-m", "clean filter");
+  git("update-index", "--assume-unchanged", hiddenRel);
+  fs.writeFileSync(path.join(dir, "clean.rs"), "fn main() { /* v3 */ }\n");
+  git("add", "clean.rs");
+  git("config", "filter.badclean.clean", `sh -c 'echo "${home}/filter-stderr" >&2; exit 1'`);
+  git("config", "filter.badclean.required", "true");
+  const filterFailed = sh(dir, "git", ["commit", "-q", "-m", "filter error"]);
+  assert.equal(filterFailed.status, 1, filterFailed.out);
+  assert.match(filterFailed.out, /cannot inspect an assume-unchanged or skip-worktree file/);
+  assert.ok(!filterFailed.out.includes(home), filterFailed.out);
+  assert.ok(!filterFailed.out.includes(path.basename(home)), filterFailed.out);
+});

@@ -90,6 +90,9 @@ const copyScripts = (dir, files) => {
 };
 const SKIP = { SKIP_REVIEW_GATE: "1", SKIP_SLOW_GATES: "1" };
 
-const hasJj = spawnSync("jj", ["--version"]).status === 0;
+const hasJj = spawnSync("jj", ["--version"], { cwd: tmp }).status === 0;
+if (!hasJj && process.env.MKV_REQUIRE_JJ === "1") {
+  throw new Error("MKV_REQUIRE_JJ=1 requires jj to be installed");
+}
 
 export { script, tmp, home, envFor, run, sh, gitRepo, hit, diff, publishedArgs, copyScripts, SKIP, hasJj };
