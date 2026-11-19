@@ -1,5 +1,5 @@
 // The review-gate ledger reads the commits a push sends, past local git replace refs and grafts
-// and past local refs that shadow origin/main.
+// and past local refs that shadow origin/main; pre-push's working-tree check reads HEAD as sent.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -75,6 +75,24 @@ test("pre-push refuses a commit hidden by a replace ref", () => {
   f.git("config", "core.hooksPath", "scripts/hooks");
   replaceGraft(f);
   refusesHidden(sh(f.dir, "git", ["push", "-q", "origin", `${f.tip}:refs/heads/topic`], { SKIP_SLOW_GATES: "1" }), f.hidden);
+});
+
+test("pre-push compares the working tree with HEAD as stored, past a replace ref", () => {
+  const f = fixture("pre-push-dirty-replace");
+  copyScripts(f.dir, ["scripts/hooks/pre-push", "scripts/hooks/hidden-changes.sh"]);
+  f.git("config", "core.hooksPath", "scripts/hooks");
+  const head = f.commit("hooks\n", "hooks.txt"); // the copied hooks would otherwise count as untracked
+  assert.equal(f.gate("record-range", f.base, head, "fixture review").status, 0);
+  // The working tree's f.txt differs from HEAD's; a replacement for HEAD with that tree would
+  // make git diff HEAD report it clean.
+  fs.writeFileSync(path.join(f.dir, "f.txt"), "dirty\n");
+  f.git("add", "f.txt");
+  const tree = f.git("write-tree");
+  f.git("reset", "-q");
+  f.git("replace", head, f.git("commit-tree", tree, "-p", `${head}^`, "-m", "replacement"));
+  const r = sh(f.dir, "git", ["push", "-q", "origin", "main"]);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /the working tree differs from HEAD/);
 });
 
 test("jj gpush refuses a commit hidden by a replace ref", { skip: !hasJj && "jj is not installed" }, () => {

@@ -49,7 +49,8 @@ head=$(git rev-parse HEAD)
 pushes_head=0
 for update in "${updates[@]}"; do
   read -r _ local_sha <<< "$update"
-  commit=$(git rev-parse "$local_sha^{commit}")
+  # The tag target the push sends, not a replace ref's (per call: the suites inherit nothing).
+  commit=$(git --no-replace-objects rev-parse "$local_sha^{commit}")
   if [ "$commit" = "$head" ]; then
     pushes_head=1
   else
@@ -63,7 +64,8 @@ done
 helper="$(dirname "$0")/hidden-changes.sh"
 source "$helper" || { echo "❌ [pre-push] cannot load $helper. Restore it: git checkout -- scripts/hooks/hidden-changes.sh" >&2; exit 1; }
 hidden=$(hidden_changes) || { echo "❌ [pre-push] cannot list the index to check for hidden edits." >&2; exit 1; }
-dirty=$(git diff --name-only HEAD)
+# HEAD's tree as pushed: a replace ref on HEAD would otherwise hide differences from it.
+dirty=$(git --no-replace-objects diff --name-only HEAD)
 untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'desktop-slint/ui/*' 'desktop-tauri/ui/*' 'scripts/*')
 if [ -n "$dirty$untracked$hidden" ]; then
   echo "❌ [pre-push] the working tree differs from HEAD, so the tests would not run on the pushed commit." >&2
