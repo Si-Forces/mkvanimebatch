@@ -1,7 +1,9 @@
 name: Install Linux system dependencies
 description: >
   apt-get install with a time-limited, retried download. A throttled mirror connection once
-  fetched 161 MB at 90 kB/s for 30 minutes; a fresh connection is usually fast again.
+  fetched 161 MB at 90 kB/s for 30 minutes; a fresh connection is usually fast again. Runners
+  whose image points apt at an EC2-region mirror have stalled on every retry, so later attempts
+  switch mirrors.
 
 inputs:
   packages:
@@ -26,13 +28,34 @@ runs:
         # files, so a retry on a fresh connection fetches only the rest. Three attempts bound a
         # throttled mirror at about 9 minutes. The install then runs from the local cache with no
         # limit, so a timeout never interrupts dpkg.
+        # Attempt 1 keeps the image's mirror list. A failure there repeats on every retry (a stall
+        # seen with us-east-2.ec2.archive.ubuntu.com, or a mirror caught mid-sync), so attempts 2
+        # and 3 replace the list, when the image has one, with Azure's mirror and then Canonical's
+        # primary.
+        mirror_file=/etc/apt/apt-mirrors.txt
+        # One fallback per retry: attempts 2 and 3.
+        fallbacks=(http://azure.archive.ubuntu.com/ubuntu/ http://archive.ubuntu.com/ubuntu/)
         for attempt in 1 2 3; do
+          if [ "$attempt" -gt 1 ] && [ -f "$mirror_file" ]; then
+            # apt keeps every mirror's indexes under the one mirror+file name, so drop the release
+            # files to make it re-check them against the new mirror. A failed switch keeps the list.
+            if printf '%s\n' "${fallbacks[attempt - 2]}" | sudo tee "$mirror_file" > /dev/null; then
+              sudo rm -f /var/lib/apt/lists/*InRelease
+            else
+              echo "::warning::could not switch apt mirrors; retrying the current list"
+            fi
+          fi
           if sudo timeout -k 10 180 sh -c 'apt-get update -y && apt-get install -y --download-only "$0" $1' \
               "$RECOMMENDS" "$PACKAGES"; then
             sudo apt-get install -y "$RECOMMENDS" $PACKAGES
             exit 0
           fi
-          echo "::warning::apt download attempt $attempt of 3 failed or took over 3 minutes"
+          # For the log only: apt may have moved past the first listed mirror, and a file it
+          # cannot read never stops a retry.
+          first_mirror=$(sed -nE '1s#^[a-z+]+://([^/[:space:]]+).*#\1#p' "$mirror_file" 2> /dev/null) || first_mirror=""
+          label="default mirrors"
+          if [ -n "$first_mirror" ]; then label="mirror list starts with $first_mirror"; fi
+          echo "::warning::apt download attempt $attempt of 3 ($label) failed or took over 3 minutes"
         done
         echo "::error::apt download failed after 3 attempts"
         exit 1
