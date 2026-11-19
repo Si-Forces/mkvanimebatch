@@ -33,21 +33,24 @@ shift
 
 root=$(git rev-parse --show-toplevel)
 cd "$root"
-git rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "unknown base: $base" >&2; exit 64; }
+# The base check and the status and diff calls below pass --no-replace-objects, as the hooks do:
+# a local replace ref would change what is diffed and what counts as clean, but not the files
+# cargo-mutants copies. Per call, so cargo and the builds it starts don't inherit it.
+git --no-replace-objects rev-parse --verify --quiet "$base^{commit}" >/dev/null || { echo "unknown base: $base" >&2; exit 64; }
 # cargo-mutants copies the working tree, so it must hold exactly HEAD. git status misses edits
 # behind an assume-unchanged or skip-worktree bit; the hooks' helper finds those.
 source "$root/scripts/hooks/hidden-changes.sh"
 # Both are plain assignments so that a failing git stops the script (set -e) rather than reading
 # as a clean tree; a substitution inside [[ ]] would not.
 hidden=$(hidden_changes)
-dirty=$(git status --porcelain --untracked-files=normal)
+dirty=$(git --no-replace-objects status --porcelain --untracked-files=normal)
 if [[ -n $dirty || -n $hidden ]]; then
   echo "working tree differs from HEAD; commit first (jj: jj commit, or jj squash with @ empty)" >&2
   [[ -z $hidden ]] || explain_hidden_changes "$hidden"
   exit 65
 fi
 
-rust_files=$(git diff --name-only "$base" HEAD -- '*.rs')
+rust_files=$(git --no-replace-objects diff --name-only "$base" HEAD -- '*.rs')
 if [[ -z $rust_files ]]; then
   echo "no Rust changes since $base; no mutants were tested"
   exit 0
@@ -60,7 +63,7 @@ mkdir -p "$tmp" "$out"
 diff="$out/in.diff"
 # Two dots on purpose: <base> may be a bookmark commit that a later squash rewrote, so it is no
 # longer an ancestor of HEAD, and a merge-base diff would widen back to the whole change.
-git diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/ "$base" HEAD -- '*.rs' >"$diff"
+git --no-replace-objects diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/ "$base" HEAD -- '*.rs' >"$diff"
 
 # No jobs override: cargo always reads $CARGO_HOME/config.toml, so the copy's builds keep the
 # same `jobs` cap as any other build (2 on the dev laptop).

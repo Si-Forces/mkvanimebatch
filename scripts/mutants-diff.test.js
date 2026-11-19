@@ -32,14 +32,15 @@ const makeBin = (name, withMutants) => {
     fs.symlinkSync(which(tool), path.join(bin, tool));
   }
   const script = (file, body) => fs.writeFileSync(path.join(bin, file), `#!/bin/sh\n${body}`, { mode: 0o755 });
-  script("git", `[ "$1" = status ] && [ -n "$FAKE_GIT_STATUS_FAIL" ] && exit 128\nexec "${GIT}" "$@"\n`);
+  script("git", `case " $* " in *" status "*) [ -n "$FAKE_GIT_STATUS_FAIL" ] && exit 128 ;; esac\nexec "${GIT}" "$@"\n`);
   if (withMutants) {
     script("cargo-mutants", "exit 0\n");
-    // `cargo mutants ...`: records its args, temp-dir env and diff, writes a report when
-    // FAKE_REPORT, FAKE_MISSED or FAKE_TIMEOUT is set (the last two also fill missed.txt and
-    // timeout.txt), and exits with FAKE_STATUS.
+    // `cargo mutants ...`: records its args, temp-dir env, GIT_NO_REPLACE_OBJECTS (which the
+    // script must not export) and diff, writes a report when FAKE_REPORT, FAKE_MISSED or
+    // FAKE_TIMEOUT is set (the last two also fill missed.txt and timeout.txt), and exits with
+    // FAKE_STATUS.
     script("cargo", `printf '%s\\n' "$@" > "$FAKE_LOG/args"
-printf 'TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\n' "$TMPDIR" "$TMP" "$TEMP" > "$FAKE_LOG/env"
+printf 'TMPDIR=%s\\nTMP=%s\\nTEMP=%s\\nGIT_NO_REPLACE_OBJECTS=%s\\n' "$TMPDIR" "$TMP" "$TEMP" "\${GIT_NO_REPLACE_OBJECTS-unset}" > "$FAKE_LOG/env"
 while [ $# -gt 0 ]; do
   case $1 in --in-diff) cp "$2" "$FAKE_LOG/diff"; shift ;; --output) out=$2; shift ;; esac
   shift
@@ -71,7 +72,9 @@ const GIT_ENV = {
 const fixture = () => {
   const dir = fs.mkdtempSync(path.join(tmp, "repo-"));
   const git = (...args) => {
-    const r = spawnSync(GIT, args, { cwd: dir, encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+    // A fresh env, so a caller's GIT_NO_REPLACE_OBJECTS cannot change what the fixture's git reads.
+    const env = { PATH: process.env.PATH, HOME: path.join(tmp, "home"), ...GIT_ENV };
+    const r = spawnSync(GIT, args, { cwd: dir, encoding: "utf8", env });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.trim();
   };
@@ -125,6 +128,16 @@ test("refuses an unknown base", () => {
   assert.equal(r.status, 64);
   assert.match(r.stderr, /unknown base: no-such-ref/);
   assert.equal(r.args, undefined);
+
+  // An id that only a replace ref resolves names no stored commit.
+  const repo = fixture();
+  const phantom = "1".repeat(repo.c1.length);
+  repo.git("update-ref", `refs/replace/${phantom}`, repo.c1);
+  assert.equal(repo.git("rev-parse", "--verify", `${phantom}^{commit}`), phantom, "plain git resolves the phantom id");
+  const replaced = run(repo, [phantom]);
+  assert.equal(replaced.status, 64, replaced.stderr);
+  assert.match(replaced.stderr, /unknown base:/);
+  assert.equal(replaced.args, undefined);
 });
 
 test("refuses a dirty tree, untracked files included", () => {
@@ -168,14 +181,14 @@ test("refuses when cargo-mutants is missing", () => {
   assert.match(r.stderr, /cargo-mutants missing/);
 });
 
-test("mutates only the Rust diff from base to HEAD, with every temp dir off /tmp", () => {
+test("mutates only the Rust diff from base to HEAD, with every temp dir off /tmp and replace refs left to cargo", () => {
   const repo = fixture();
   const mt = path.join(tmp, "mt");
   const r = run(repo, [repo.c1, "-p", "mkv-core"], { MUTANTS_TMPDIR: mt, FAKE_STATUS: "2", FAKE_MISSED: "a.rs:1: replace a" });
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.diff, /^\+fn a\(\) \{ b\(\) \}$/m);
   assert.doesNotMatch(r.diff, /README/);
-  assert.equal(r.env, `TMPDIR=${mt}\nTMP=${mt}\nTEMP=${mt}\n`);
+  assert.equal(r.env, `TMPDIR=${mt}\nTMP=${mt}\nTEMP=${mt}\nGIT_NO_REPLACE_OBJECTS=unset\n`);
   assert.deepEqual(r.args.trim().split("\n"), [
     "mutants", "--in-diff", `${mt}/out/in.diff`, "--output", `${mt}/out`, "--no-shuffle", "-p", "mkv-core",
   ]);
@@ -230,6 +243,19 @@ test("a base that a later amend rewrote scopes the run to the amend alone", () =
   assert.equal(docs.status, 0, docs.stderr);
   assert.match(docs.stdout, /no Rust changes since/);
   assert.equal(docs.args, undefined);
+});
+
+test("reads HEAD as stored, not a replace ref whose tree matches the base", () => {
+  // Through the replace ref the tree would read as dirty and the diff as empty, though
+  // cargo-mutants copies the working tree, which holds HEAD's Rust change.
+  const repo = fixture();
+  const standIn = repo.git("commit-tree", `${repo.c1}^{tree}`, "-m", "stand-in");
+  repo.git("replace", "HEAD", standIn);
+  assert.equal(repo.git("diff", "--name-only", repo.c1, "HEAD"), "", "plain git sees an empty diff through the replace ref");
+  assert.notEqual(repo.git("status", "--porcelain"), "", "plain git sees the replaced HEAD as dirty");
+  const r = run(repo, [repo.c1]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.diff, /^\+fn a\(\) \{ b\(\) \}$/m);
 });
 
 test("MUTANTS_OUT moves the diff and the report off the temp dir", () => {
