@@ -86,7 +86,10 @@ case $mode in
         push_urls=$(git remote get-url --push --all -- "$4" 2> /dev/null && printf .) || push_urls=""
         fetch_url=${fetch_url%$'\n.'} push_urls=${push_urls%$'\n.'}
         if [[ -n $fetch_url && $fetch_url != *$'\n'* && $fetch_url == "$push_urls" ]]; then
-          old=$(git --no-replace-objects rev-parse --verify --quiet "refs/remotes/$4/main^{commit}" 2> /dev/null) || old=""
+          # By exact ref name: as a revision, a missing tracking ref's full name resolves to a
+          # local branch named refs/remotes/<remote>/main, which would then hide its commits.
+          old=$(git show-ref --verify --hash "refs/remotes/$4/main" 2> /dev/null) &&
+            old=$(git --no-replace-objects rev-parse --verify --quiet "$old^{commit}" 2> /dev/null) || old=""
         fi
       fi
     fi
