@@ -82,7 +82,8 @@ test("pre-push compares the working tree with HEAD as stored, past a replace ref
   copyScripts(f.dir, ["scripts/hooks/pre-push", "scripts/hooks/hidden-changes.sh"]);
   f.git("config", "core.hooksPath", "scripts/hooks");
   const head = f.commit("hooks\n", "hooks.txt"); // the copied hooks would otherwise count as untracked
-  assert.equal(f.gate("record-range", f.base, head, "fixture review").status, 0);
+  const recorded = f.gate("record-range", f.base, head, "fixture review");
+  assert.equal(recorded.status, 0, recorded.out);
   // The working tree's f.txt differs from HEAD's; a replacement for HEAD with that tree would
   // make git diff HEAD report it clean.
   fs.writeFileSync(path.join(f.dir, "f.txt"), "dirty\n");
@@ -90,6 +91,7 @@ test("pre-push compares the working tree with HEAD as stored, past a replace ref
   const tree = f.git("write-tree");
   f.git("reset", "-q");
   f.git("replace", head, f.git("commit-tree", tree, "-p", `${head}^`, "-m", "replacement"));
+  assert.equal(f.git("diff", "--name-only", "HEAD"), "", "the replace ref no longer hides the dirty file");
   const r = sh(f.dir, "git", ["push", "-q", "origin", "main"]);
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /the working tree differs from HEAD/);
