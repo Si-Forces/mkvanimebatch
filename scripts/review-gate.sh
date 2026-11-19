@@ -34,6 +34,12 @@ command -v node > /dev/null || die "node is required"
 # shows it.
 export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null/none
 
+# origin/main's commit, looked up by its exact ref name, or empty when there is none. Neither
+# name is safe as a revision: a local tag or branch named origin/main wins the short one, and
+# with the tracking ref missing a branch named refs/remotes/origin/main answers for the full one.
+MAIN=$(git show-ref --verify --hash refs/remotes/origin/main 2> /dev/null) &&
+  MAIN=$(git rev-parse --verify --quiet "$MAIN^{commit}") || MAIN=""
+
 # The common git dir is shared by every worktree of this clone.
 LEDGER="${REVIEW_LEDGER:-$(git rev-parse --path-format=absolute --git-common-dir)/review-ledger.jsonl}"
 
@@ -50,9 +56,9 @@ patch_id_of() { # <commit> -> patch id, empty when the commit changes nothing
 
 # Fork point from origin/main: where the commits that still need a review start.
 review_base() { # <commit>
-  git rev-parse --verify --quiet origin/main > /dev/null ||
+  [ -n "$MAIN" ] ||
     die "no origin/main; cannot determine a review base (fetch first)"
-  git merge-base origin/main "$1" ||
+  git merge-base "$MAIN" "$1" ||
     die "$1 shares no history with origin/main"
 }
 
@@ -149,9 +155,9 @@ verify_push() { # <remote-sha> <local-sha>
   # checked. With no shared history (an orphan branch, a shallow clone) it keeps the old tip.
   from=$base
   # Without origin/main nothing is skipped, which only checks more.
-  if git rev-parse --verify --quiet origin/main > /dev/null; then
-    exclude=(^origin/main)
-    if fork=$(git merge-base origin/main "$head") && ! git merge-base --is-ancestor "$fork" "$base"; then
+  if [ -n "$MAIN" ]; then
+    exclude=("^$MAIN")
+    if fork=$(git merge-base "$MAIN" "$head") && ! git merge-base --is-ancestor "$fork" "$base"; then
       from=$fork
     fi
   fi
