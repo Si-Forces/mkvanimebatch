@@ -90,6 +90,59 @@ test("pre-commit diffs from the HEAD the commit extends, not a replacement", () 
   assert.match(r.out, /name your home directory/);
 });
 
+test("pre-commit picks the staged files against the HEAD the commit extends, not a replacement", () => {
+  const { dir, git, commit } = gitRepo("replaced-head-staged-list");
+  commit("clean\n");
+  git("config", "core.hooksPath", path.dirname(script));
+  fs.mkdirSync(path.dirname(path.join(dir, nestedScript)), { recursive: true });
+  fs.writeFileSync(path.join(dir, nestedScript), "const = ;\n");
+  git("add", nestedScript);
+  // A stand-in for HEAD whose tree already holds the broken file, so it drops out of the staged
+  // list; the f.txt edit keeps the commit non-empty against the stand-in too.
+  const standIn = git("commit-tree", git("write-tree"), "-m", "stand-in");
+  git("replace", "HEAD", standIn);
+  fs.writeFileSync(path.join(dir, "f.txt"), "edited\n");
+  git("add", "f.txt");
+  assert.equal(git("diff", "--cached", "--name-only"), "f.txt", "the replace ref no longer hides the staged file");
+  const r = sh(dir, "git", ["commit", "-q", "-m", "syntax"]);
+  assert.equal(r.status, 1, r.out);
+  assert.ok(r.out.includes(`node --check failed: ${nestedScript}`), r.out);
+});
+
+test("pre-commit checks a staged script's blob as stored, not a replacement", () => {
+  const { dir, git, commit } = gitRepo("replaced-staged-blob");
+  commit("clean\n");
+  git("config", "core.hooksPath", path.dirname(script));
+  fs.mkdirSync(path.dirname(path.join(dir, nestedScript)), { recursive: true });
+  fs.writeFileSync(path.join(dir, nestedScript), "const = ;\n");
+  git("add", nestedScript);
+  // A valid stand-in for the broken staged blob; the commit still stores the broken one.
+  const validFile = path.join(tmp, "replaced-staged-blob.js");
+  fs.writeFileSync(validFile, "export const checked = true;\n");
+  const valid = git("hash-object", "-w", validFile);
+  git("replace", git("rev-parse", `:${nestedScript}`), valid);
+  assert.equal(git("show", `:${nestedScript}`), "export const checked = true;", "the replace ref no longer hides the broken blob");
+  const r = sh(dir, "git", ["commit", "-q", "-m", "syntax"]);
+  assert.equal(r.status, 1, r.out);
+  assert.ok(r.out.includes(`node --check failed: ${nestedScript}`), r.out);
+});
+
+test("pre-commit compares the working tree with staged Rust blobs as stored, not a replacement", () => {
+  const { dir, git, commit } = gitRepo("replaced-staged-rust");
+  commit("clean\n");
+  git("config", "core.hooksPath", path.dirname(script));
+  fs.writeFileSync(path.join(dir, "a.rs"), "fn a( {\n");
+  git("add", "a.rs");
+  // The working tree and a stand-in for the staged blob hold valid code; the commit stores the
+  // broken blob, so cargo would check the wrong file.
+  fs.writeFileSync(path.join(dir, "a.rs"), "fn a() {}\n");
+  git("replace", git("rev-parse", ":a.rs"), git("hash-object", "-w", "a.rs"));
+  assert.equal(git("diff", "--name-only"), "", "the replace ref no longer hides the unstaged edit");
+  const r = sh(dir, "git", ["commit", "-q", "-m", "rust"]);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /Rust\/Cargo files differ from the index/);
+});
+
 test("pre-commit checks a staged leak before a dirty Rust tree stops it", () => {
   const { dir, git } = gitRepo("dirty");
   git("config", "core.hooksPath", path.dirname(script));

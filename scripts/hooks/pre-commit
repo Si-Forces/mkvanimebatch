@@ -4,8 +4,9 @@
 set -euo pipefail
 
 # -z keeps non-ASCII paths unquoted. Deletions are included: removing a .rs file can
-# break the build as surely as editing one.
-mapfile -d '' staged < <(git diff --cached --name-only -z)
+# break the build as surely as editing one. Against HEAD as stored: a replace ref on HEAD
+# would otherwise drop files from the list (per call: cargo inherits nothing).
+mapfile -d '' staged < <(git --no-replace-objects diff --cached --name-only -z)
 wait $! # a process substitution's failure is otherwise ignored
 
 rust=0
@@ -25,7 +26,8 @@ fail=0
 if [ "$rust" -eq 1 ]; then
   # cargo reads the working tree, so it must hold exactly what is being committed.
   # Scoped to the paths cargo reads; the UI check below reads staged blobs, not the tree.
-  unstaged=$(git diff --name-only -- '*.rs' '*Cargo.toml' Cargo.lock 'desktop-slint/ui/*')
+  # Staged blobs as stored: a replace ref on one would otherwise match the working tree.
+  unstaged=$(git --no-replace-objects diff --name-only -- '*.rs' '*Cargo.toml' Cargo.lock 'desktop-slint/ui/*')
   untracked=$(git ls-files --others --exclude-standard -- '*.rs' '*Cargo.toml' 'desktop-slint/ui/*')
   helper="$(dirname "$0")/hidden-changes.sh"
   source "$helper" || { echo "❌ [pre-commit] cannot load $helper. Restore it: git checkout -- scripts/hooks/hidden-changes.sh" >&2; exit 1; }
@@ -47,12 +49,13 @@ if [ "$rust" -eq 1 ]; then
   cargo clippy --workspace --all-targets -- -D warnings || { echo "❌ [pre-commit] clippy failed." >&2; fail=1; }
 fi
 
-# Checks the staged blob itself, so unstaged edits cannot hide a syntax error.
+# Checks the staged blob itself, so unstaged edits cannot hide a syntax error, and as stored,
+# so a replace ref on it cannot either.
 for f in "${staged_js[@]}"; do
   git cat-file -e ":$f" 2> /dev/null || continue # staged deletion
   # theme-init.js must stay a classic script (CSP, see its header); the rest are modules.
   case "$f" in */theme-init.js) input_type=commonjs ;; *) input_type=module ;; esac
-  git show ":$f" | node --check --input-type="$input_type" ||
+  git --no-replace-objects show ":$f" | node --check --input-type="$input_type" ||
     { echo "❌ [pre-commit] node --check failed: $f" >&2; fail=1; }
 done
 
