@@ -758,23 +758,38 @@ test("--published accepts SHA-256 old and new endpoints", () => {
 test("baseline lookup rejects paths and noncommit refs and hides Git failure details", () => {
   const { dir, git, commit } = gitRepo("baseline-lookup");
   git("remote", "add", "origin", path.join(tmp, "baseline-lookup.git"));
-  const file = "refs/remotes/origin/main^{commit}";
-  fs.mkdirSync(path.join(dir, path.dirname(file)), { recursive: true });
-  fs.writeFileSync(path.join(dir, file), "a file, not a revision\n");
   const base = commit("clean\n");
   assert.deepEqual(run("", {}, { args: publishedArgs(base), cwd: dir }), { status: 0, stderr: "" });
   const leak = commit(`${home}/x\n`);
   hit(run("", {}, { args: publishedArgs(leak), cwd: dir }));
   const blob = git("hash-object", "-w", "f.txt");
   git("update-ref", "refs/remotes/origin/main", blob);
+  // Without --verify, rev-parse would take this file for the blob's failed peel.
+  fs.writeFileSync(path.join(dir, `${blob}^{commit}`), "a file, not a revision\n");
   assert.deepEqual(run("", {}, { args: publishedArgs(base), cwd: dir }), { status: 0, stderr: "" });
+  // A blob is no baseline: the refusal says all history was checked.
+  const blind = run("", {}, { args: publishedArgs(leak), cwd: dir });
+  hit(blind);
+  assert.match(blind.stderr, /No trusted baseline was found/);
   git("update-ref", "refs/remotes/origin/main", leak);
   git("replace", "-f", leak, blob);
   assert.deepEqual(run("", {}, { args: publishedArgs(leak), cwd: dir }), { status: 0, stderr: "" },
     "a type-changing local replacement cannot invalidate a trusted original baseline");
-  const startup = path.join(tmp, "private-baseline-error.bash");
-  fs.writeFileSync(startup, 'git() { if [ "${2:-}" = rev-parse ]; then echo "$HOME/private" >&2; return 1; fi; command git "$@"; }\n');
-  assert.deepEqual(run("", { BASH_ENV: startup }, { args: publishedArgs(base), cwd: dir }), { status: 0, stderr: "" });
+  // Each lookup step fails in turn, with git's error naming the home.
+  for (const step of ['"${1:-}" = show-ref', '"${2:-}" = rev-parse']) {
+    const startup = path.join(tmp, "private-baseline-error.bash");
+    fs.writeFileSync(startup, `git() { if [ ${step} ]; then echo "$HOME/private" >&2; return 1; fi; command git "$@"; }\n`);
+    assert.deepEqual(run("", { BASH_ENV: startup }, { args: publishedArgs(base), cwd: dir }), { status: 0, stderr: "" }, step);
+  }
+});
+
+test("a local branch named refs/remotes/<remote>/main cannot stand in for a missing baseline", () => {
+  // As a revision, the missing tracking ref's full name resolves to this branch.
+  const { dir, git, commit } = gitRepo("impostor-baseline");
+  git("remote", "add", "origin", path.join(tmp, "impostor-baseline.git"));
+  const leak = commit(`${home}/x\n`);
+  git("branch", "refs/remotes/origin/main", leak);
+  hit(run("", {}, { args: publishedArgs(leak), cwd: dir }));
 });
 
 test("--staged fails closed when git cannot read the index, with only the script's own line", () => {
