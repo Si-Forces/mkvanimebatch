@@ -231,10 +231,10 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          pin=$(sed -n 's/^skia-bindings = { version = "=\([0-9.]*\)".*/\1/p' desktop-slint/ui/Cargo.toml)
-          locked=$(awk '/^name = "skia-bindings"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' Cargo.lock)
+          pin=$(sed -n 's/^skia-bindings = { version = "=\([0-9.]*\)".*"no-compile".*/\1/p' desktop-slint/ui/Cargo.toml)
+          locked=$(awk '/^name = "skia-bindings"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' Cargo.lock | paste -sd ' ' -)
           if [ -z "$pin" ] || [ "$locked" != "$pin" ]; then
-            echo "::error::Cargo.lock holds skia-bindings '$locked' but desktop-slint/ui/Cargo.toml pins '=$pin'"
+            echo "::error::Cargo.lock holds skia-bindings '$locked' but desktop-slint/ui/Cargo.toml pins '=$pin' with no-compile"
             exit 1
           fi
 

@@ -19,20 +19,23 @@
 //! `map_ms` is each publication's push on the publishing thread, off the UI thread: the rows
 //! mapped, then the diff against the model under the coalescer's lock. `pub_ms` is the UI-thread
 //! time of each publication's hop (the take and the model writes), not the layout those writes
-//! cause, which the next frame's `render_ms` carries; `reset_ms` the first hop, which puts all
-//! 1000 rows into the empty model; `filter_ms` the hop of a filter change to Failed at the end,
-//! which writes nearly every row (the bench maps it on the UI thread before the timed hop; the app
-//! maps it off the UI thread), and `filter_frame` the render and interval of the frame drawn after
-//! it, where the ListView lays out the rows the filter hid at 0 px. Its render runs from winit's
-//! `RedrawRequested`, not `BeforeRendering`: Slint instantiates and lays out the ListView's rows
-//! before it calls the notifier (`WindowInner::draw_contents`, `ensure_tree_instantiated`). The Library is the core's for
-//! these rows, so each release's group header is its own. `interval_ms` is the time between
-//! presented frames (vsync-bound, so a hair over 16.67 ms is jitter, and over 25 ms a missed
-//! vsync); `render_ms` each frame's rendering on the UI thread.
+//! cause, which the next frame's `interval_ms` carries: `render_ms` starts at `BeforeRendering`,
+//! after Slint's layout, and stays so to compare with earlier runs. `reset_ms` is the first hop,
+//! which puts all 1000 rows into the empty model; `filter_ms` the hop of a filter change to Failed
+//! at the end, which writes nearly every row (the bench maps it on the UI thread before the timed
+//! hop; the app maps it off the UI thread), and `filter_frame` the render and interval of the
+//! frame drawn after it, where the ListView lays out the rows the filter hid at 0 px. Its interval
+//! also holds the bench's own remap and hop, which run in the frame before it. The Library is the
+//! core's for these rows, so each release's group header is its own. `interval_ms` is the time
+//! between presented frames (vsync-bound, so a hair over 16.67 ms is jitter, and over 25 ms a
+//! missed vsync); `render_ms` each frame's rendering on the UI thread.
 //! Halfway through the window a Run's forced scan publishes a new `manifest_rev` with the same
 //! rows, which resets the whole row model (`queue::diff_rows`): `run_reset_ms` is that hop's
 //! UI-thread time, and `run_reset_frame` the render and interval of the frame it lands in (the
-//! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
+//! first presented after it). `filter_frame`'s and `run_reset_frame`'s renders run from winit's
+//! `RedrawRequested`, not `BeforeRendering`: Slint instantiates and lays out the ListView's rows
+//! before it calls the notifier (`WindowInner::draw_contents`, `ensure_tree_instantiated`).
+//! The churn's clock and progress stack redraw the bottom bar (P5).
 //! `put_ms` is `ModeList::put` before the window opens, which a publication runs under the
 //! coalescer's lock, so a hop's take waits on it: p50 and max of `PUT_RUNS` puts with rows mapped
 //! for the list's filter (`match`), and with rows mapped for a filter changed since, which `put`
@@ -527,7 +530,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if let (None, Some((_, at))) = (reset_frame, *run_reset.lock().unwrap()) {
                     if now > at {
                         let interval = intervals.last().copied().unwrap_or(f64::NAN);
-                        reset_frame = Some((ms(now.duration_since(before)), interval));
+                        reset_frame = Some((ms(now.duration_since(redraw.get())), interval));
                     }
                 }
                 // Bounce between the ends; the bottom is approximate (the list is shorter than the
