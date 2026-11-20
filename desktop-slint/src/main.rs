@@ -417,7 +417,8 @@ fn start_close(
 
 /// Minimizes through winit. Slint caches `minimized` and only calls winit when it changes, but on
 /// Wayland winit cannot report the minimized state, so after a restore the cache stays set and
-/// every later minimize is dropped (ADR-0017 decision 4).
+/// every later minimize is dropped (ADR-0017 decision 4). Re-checked at Slint 1.19.0: still so
+/// (`winitwindowadapter.rs` caches it, and winit 0.30.13's Wayland `is_minimized` is `None`).
 fn minimize(app: &App) {
     app.window()
         .with_winit_window(|window| window.set_minimized(true));

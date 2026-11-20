@@ -73,8 +73,8 @@ pub(crate) fn show(app: &App, view: Option<&TelemetryView>) {
 /// Whether the window shows, from what winit reports: hidden while occluded (X11), while its size
 /// is zero (a minimized window on Windows, which sends no `Occluded`: Slint's
 /// `winitwindowadapter.rs` works around the same), or while minimized as `Window::is_minimized`
-/// polls it (X11 and Windows). On Wayland winit 0.30 reports none of these, so the window counts as
-/// shown there.
+/// polls it (X11 and Windows). On Wayland winit 0.30 reports none of these (still so in 0.30.13,
+/// the winit Slint 1.19.0 resolves), so the window counts as shown there.
 #[derive(Debug, Default)]
 pub(crate) struct Visibility {
     occluded: bool,
