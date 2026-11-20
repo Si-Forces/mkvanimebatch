@@ -23,23 +23,13 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # The generated UI (`App`), in its own crate because of its `unsafe_code` lint (ADR-0017 amendment).
 mkv-anime-batch-slint-ui = { path = "ui" }
 
-# Slint master 45cb2b3 until 1.19 ships `backdrop-blur` (ADR-0017 decision 2). A Slint bump moves
-# slint here and in ui/Cargo.toml, slint-build and i-slint-backend-testing together, in its own commit.
-# ADR-0017 decision 3: no FemtoVG, no system tray; Skia on OpenGL with the software renderer.
+# Slint's version and features are the workspace's (root Cargo.toml), shared with ui/Cargo.toml.
 # Cargo.lock: gpu-allocator (via Skia's wgpu-30) must resolve `windows` 0.62, as wgpu-hal does. Its
 # range also allows 0.61, which Tauri's tao and wry hold, and the resolver reuses that; the Windows
 # build then fails in wgpu-hal (E0277, two `windows_core`). The desktop-slint CI job checks it
 # ("gpu-allocator and wgpu-hal share one windows crate"); after a `cargo update` that fails, point
 # gpu-allocator's `windows` entry in Cargo.lock back at wgpu-hal's version.
-slint = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", default-features = false, features = [
-    "std",
-    "compat-1-2",
-    "backend-winit",
-    "renderer-skia-opengl",
-    "renderer-software",
-    "accessibility",
-    "unstable-winit-030",
-] }
+slint = { workspace = true }
 
 # The folder picker (XDG portal on Linux, as the Tauri host's), and the GPU fallback dialog's
 # MessageBoxW on Windows; Linux runs zenity or kdialog for that dialog itself (renderer.rs).
@@ -58,10 +48,10 @@ tauri-winres = "0.3"
 
 [dev-dependencies]
 # `renderer-software`: headless snapshots for the font test.
-i-slint-backend-testing = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", features = ["renderer-software"] }
+i-slint-backend-testing = { workspace = true, features = ["renderer-software"] }
 tempfile = "3"
 # Sets the system's colour scheme in a test of the Appearance menu's System (no public API does).
-i-slint-core = { git = "https://github.com/slint-ui/slint", rev = "45cb2b33420e1b3c8a13b6a765d2b5077d9c9608", default-features = false }
+i-slint-core = { workspace = true }
 
 # The FrameStats bench (P2, reused by P7 and the P9 gate): run by hand, never by `cargo test`.
 [[bench]]

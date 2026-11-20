@@ -15,6 +15,25 @@ authors = ["sifahaz"]
 license = "MIT"
 repository = "https://github.com/Si-Forces/mkvanimebatch"
 
+# Slint for the Slint host and its generated UI crate (ADR-0017 decisions 2 and 3), here so the two
+# cannot drift. Exact pins: the host uses `unstable-winit-030`, and the testing and core crates'
+# APIs are internal, so Slint's semver covers none of them. Bump all four together, in their own
+# commit, then re-check decision 4's minimize workaround and the winit feature against the release.
+# Decision 3: no FemtoVG, no system tray; Skia on OpenGL with the software renderer.
+[workspace.dependencies]
+slint = { version = "=1.19.0", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-skia-opengl",
+    "renderer-software",
+    "accessibility",
+    "unstable-winit-030",
+] }
+slint-build = "=1.19.0"
+i-slint-backend-testing = "=1.19.0"
+i-slint-core = { version = "=1.19.0", default-features = false }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
