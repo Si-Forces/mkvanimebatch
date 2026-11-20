@@ -26,14 +26,19 @@
 //! cause, which the next frame's `render_ms` carries; `reset_ms` the first hop, which puts all
 //! 1000 rows into the empty model; `filter_ms` the hop of a filter change to Failed at the end,
 //! which writes nearly every row (the bench maps it on the UI thread before the timed hop; the app
-//! maps it off the UI thread). The Library is the core's for these rows, so each release's group
-//! header is its own. `interval_ms` is the time between presented frames (vsync-bound, so a hair
-//! over 16.67 ms is jitter, and over 25 ms a missed vsync); `render_ms` each frame's rendering on
-//! the UI thread.
+//! maps it off the UI thread), and `filter_frame` the render and interval of the frame drawn after
+//! it, where the ListView lays out the rows the filter hid at 0 px. The Library is the core's for
+//! these rows, so each release's group header is its own. `interval_ms` is the time between
+//! presented frames (vsync-bound, so a hair over 16.67 ms is jitter, and over 25 ms a missed
+//! vsync); `render_ms` each frame's rendering on the UI thread.
 //! Halfway through the window a Run's forced scan publishes a new `manifest_rev` with the same
 //! rows, which resets the whole row model (`queue::diff_rows`): `run_reset_ms` is that hop's
 //! UI-thread time, and `run_reset_frame` the render and interval of the frame it lands in (the
 //! first presented after it). The churn's clock and progress stack redraw the bottom bar (P5).
+//! `put_ms` is `ModeList::put` before the window opens, which a publication runs under the
+//! coalescer's lock, so a hop's take waits on it: p50 and max of `PUT_RUNS` puts with rows mapped
+//! for the list's filter (`match`), and with rows mapped for a filter changed since, which `put`
+//! maps again under the lock (`remap`; `remap` minus `match` is that mapping's cost).
 //! Budget (#135): publication p99 < 4 ms, and no frame over 16.7 ms, read as no render over
 //! 16.7 ms and no missed vsync. A provisional read of ADR-0017 decision 8's glass numbers
 //! (`glass_provisional`): the glass third at 50 fps or more on average and 45 fps or more at its
@@ -41,7 +46,8 @@
 //! real core publishing at 15 Hz, where this opens it for a third, under synthetic churn and
 //! telemetry; P9 (#142) runs the gate itself. Decision 8 defines its numbers on the real blur,
 //! drawn with `MKV_BENCH_BLUR=1` (`glass_frame=blur:1` in the line); without, the faked glass the
-//! app ships is read by the same numbers. The line ends with PASS or FAIL for each.
+//! app ships is read by the same numbers. The line ends with PASS or FAIL for each, or
+//! INSUFFICIENT when the run has too few samples to judge it (under two publications, no frame).
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their
@@ -76,7 +82,7 @@ mod settings;
 mod telemetry;
 
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, Theme};
-use mkv_desktop_core::actor::ViewState;
+use mkv_desktop_core::actor::{ModeView, ViewState};
 use mkv_desktop_core::presentation::{
     bucket, library, status_label, status_title, status_tone, Tone,
 };
@@ -102,6 +108,8 @@ const IN_FLIGHT: usize = 8;
 /// A row's and a release header's height in queue.slint.
 const ROW_H: f32 = 52.0;
 const HEAD_H: f32 = 30.0;
+/// How many times `put_cost` times each kind of put.
+const PUT_RUNS: usize = 20;
 
 const SHOWS: &[(&str, &str)] = &[
     ("SubsPlease", "Frieren - Beyond Journey's End"),
@@ -275,22 +283,55 @@ fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-/// `name_ms p50=… p99=… max=…` over `values`.
+/// The `p` quantile of `sorted`, NaN when empty.
+fn pct(sorted: &[f64], p: f64) -> f64 {
+    let last = sorted.len().saturating_sub(1);
+    sorted
+        .get((last as f64 * p).round() as usize)
+        .copied()
+        .unwrap_or(f64::NAN)
+}
+
+/// `name_ms p50=… p99=… max=…` over `values`, which it leaves sorted.
 fn summary(name: &str, values: &mut [f64]) -> String {
     values.sort_by(f64::total_cmp);
-    let pct = |p: f64| {
-        let last = values.len().saturating_sub(1);
-        values
-            .get((last as f64 * p).round() as usize)
-            .copied()
-            .unwrap_or(f64::NAN)
-    };
     format!(
         "{name}_ms p50={:.2} p99={:.2} max={:.2}",
-        pct(0.5),
-        pct(0.99),
-        pct(1.0)
+        pct(values, 0.5),
+        pct(values, 0.99),
+        pct(values, 1.0)
     )
+}
+
+/// PASS or FAIL, or INSUFFICIENT without `enough` samples to judge.
+fn verdict(enough: bool, pass: bool) -> &'static str {
+    match (enough, pass) {
+        (false, _) => "INSUFFICIENT",
+        (true, true) => "PASS",
+        (true, false) => "FAIL",
+    }
+}
+
+/// `put_ms` (R3F-155-08): `ModeList::put` of `view` into a list showing every row, `PUT_RUNS`
+/// times with its rows mapped for every row and as many with them mapped for Failed, which `put`
+/// maps again under the lock. Both stage a diff against the same empty model.
+fn put_cost(view: &ModeView) -> String {
+    let mut list = queue::ModeList::new(Mode::Remux);
+    let mut time = |mapped: QueueFilter| {
+        let mut runs: Vec<f64> = (0..PUT_RUNS)
+            .map(|_| {
+                let rows = queue::map_rows(&view.rows, &view.library, mapped);
+                let view = view.clone();
+                let start = Instant::now();
+                list.put(view, Some((mapped, rows)));
+                ms(start.elapsed())
+            })
+            .collect();
+        runs.sort_by(f64::total_cmp);
+        format!("{:.2}/{:.2}", pct(&runs, 0.5), pct(&runs, 1.0))
+    };
+    let matched = time(QueueFilter::All);
+    format!("put_ms=match:{matched},remap:{}", time(QueueFilter::Failed))
 }
 
 /// The spike's FrameStats figures over frame `intervals` (ms): the average fps (frames over their
@@ -326,6 +367,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     state.remux.manifest_rev = 1;
     state.remux.library = library(Some("/media/anime"), &rows);
     state.remux.rows = Arc::new(rows);
+    let put = put_cost(&state.remux);
 
     // SlintPublisher's push and schedule, with the hop timed: its time is the publication's
     // UI-thread time.
@@ -390,6 +432,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut reset_asked = false;
     // The render and interval of the frame the Run reset lands in.
     let mut reset_frame: Option<(f64, f64)> = None;
+    // At the window's end: its publications' hops and pushes, and the filter change's hop, kept
+    // for the report the next frame (the filter's) prints.
+    let mut ended: Option<(Vec<f64>, Vec<f64>, f64)> = None;
     app.window()
         .set_rendering_notifier(move |state, _| {
             match state {
@@ -401,6 +446,41 @@ fn main() -> Result<(), Box<dyn Error>> {
             let (Some(app), false) = (weak.upgrade(), reported) else {
                 return;
             };
+            if let Some((mut hops, mut maps, filter)) = ended.take() {
+                // The frame after the filter change (P2-R3-04), outside the window's figures.
+                let filter_render = ms(now.duration_since(before));
+                let filter_interval = last.map_or(f64::NAN, |last| ms(now.duration_since(last)));
+                reported = true;
+                let over = |ms: f64| intervals.iter().filter(|&&i| i > ms).count();
+                let (over_frame, over_vsync) = (over(16.7), over(25.0));
+                let render_max = renders.iter().copied().fold(0.0, f64::max);
+                let glass_render_max = glass_renders.iter().copied().fold(0.0, f64::max);
+                let glass_over_vsync = glass_intervals.iter().filter(|&&i| i > 25.0).count();
+                let (glass_avg, glass_low) = fps(&glass_intervals);
+                // ADR-0017 decision 8's glass numbers, read provisionally (see the header).
+                let glass_gate = glass_avg >= 50.0 && glass_low >= 45.0;
+                let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
+                let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
+                let (map, publ) = (summary("map", &mut maps), summary("pub", &mut hops));
+                let frames = intervals.len();
+                let (interval, render) = (
+                    summary("interval", &mut intervals),
+                    summary("render", &mut renders),
+                );
+                println!(
+                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {map} {publ} reset_ms={reset:.2} filter_ms={filter:.2} filter_frame=render:{filter_render:.2},interval:{filter_interval:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} {put} frames={frames} {interval} over_16.7ms={over_frame} over_25ms={over_vsync} {render} glass_frame=blur:{},frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} glass_provisional={}",
+                    if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
+                    hops.len(),
+                    u8::from(blur),
+                    glass_renders.len(),
+                    // `hops` is sorted by its summary.
+                    verdict(hops.len() > 1, pct(&hops, 0.99) < 4.0),
+                    verdict(frames > 0, render_max <= 16.7 && over_vsync == 0),
+                    verdict(!glass_intervals.is_empty(), glass_gate),
+                );
+                let _ = slint::quit_event_loop();
+                return;
+            }
             let since = now.duration_since(*first.get_or_insert(now));
             if since >= WARMUP {
                 match last.replace(now) {
@@ -446,48 +526,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 app.set_remux_scroll(-y);
             }
             if since >= WARMUP + WINDOW {
-                reported = true;
-                let over = |ms: f64| intervals.iter().filter(|&&i| i > ms).count();
-                let (over_frame, over_vsync) = (over(16.7), over(25.0));
-                let mut hops = std::mem::take(&mut *hops.lock().unwrap());
-                let mut maps = std::mem::take(&mut *maps.lock().unwrap());
-                // A filter change: kept and mapped on the UI thread, then the hop timed.
+                let hops = std::mem::take(&mut *hops.lock().unwrap());
+                let maps = std::mem::take(&mut *maps.lock().unwrap());
+                // A filter change: kept and mapped on the UI thread, then the hop timed; the next
+                // frame draws it and reports.
                 filtered.set_filter(Mode::Remux, QueueFilter::Failed);
                 filtered.remap(Mode::Remux);
                 let start = Instant::now();
                 publisher::hop(&filtered, &filter_edits, &filter_window);
-                let filter = ms(start.elapsed());
-                let verdict = |pass: bool| if pass { "PASS" } else { "FAIL" };
-                let render_max = renders.iter().copied().fold(0.0, f64::max);
-                let glass_render_max = glass_renders.iter().copied().fold(0.0, f64::max);
-                let glass_over_vsync = glass_intervals.iter().filter(|&&i| i > 25.0).count();
-                let (glass_avg, glass_low) = fps(&glass_intervals);
-                // ADR-0017 decision 8's glass numbers, read provisionally (see the header).
-                let glass_gate = glass_avg >= 50.0 && glass_low >= 45.0;
-                let run_reset_ms = run_reset.lock().unwrap().map_or(f64::NAN, |(took, _)| took);
-                let (reset_render, reset_interval) = reset_frame.unwrap_or((f64::NAN, f64::NAN));
-                let pub_budget = hops.len() > 1 && {
-                    let mut sorted = hops.clone();
-                    sorted.sort_by(f64::total_cmp);
-                    sorted[((sorted.len() - 1) as f64 * 0.99).round() as usize] < 4.0
-                };
-                println!(
-                    "BENCH session={} renderer=skia-opengl rows={ROWS} publications={} {} {} reset_ms={reset:.2} filter_ms={filter:.2} run_reset_ms={run_reset_ms:.2} run_reset_frame=render:{reset_render:.2},interval:{reset_interval:.2} frames={} {} over_16.7ms={over_frame} over_25ms={over_vsync} {} glass_frame=blur:{},frames:{},render_max:{glass_render_max:.2},over_25ms:{glass_over_vsync},avg_fps:{glass_avg:.1},low1_fps:{glass_low:.1} budget_pub={} budget_frame={} glass_provisional={}",
-                    if std::env::var_os("WAYLAND_DISPLAY").is_some() { "wayland" } else { "x11" },
-                    hops.len(),
-                    summary("map", &mut maps),
-                    summary("pub", &mut hops),
-                    intervals.len(),
-                    summary("interval", &mut intervals),
-                    summary("render", &mut renders),
-                    u8::from(blur),
-                    glass_renders.len(),
-                    verdict(pub_budget),
-                    verdict(render_max <= 16.7 && over_vsync == 0),
-                    verdict(glass_gate),
-                );
-                let _ = slint::quit_event_loop();
-                return;
+                ended = Some((hops, maps, ms(start.elapsed())));
             }
             app.window().request_redraw();
         })
