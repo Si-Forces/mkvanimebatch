@@ -121,13 +121,14 @@ component LogConsole inherits Rectangle {
         color: Theme.mute;
         font-family: "JetBrains Mono";
         font-size: 12px;
+        line-height-factor: Theme.lh-log;
         wrap: word-wrap;
     }
-    // .log-body's 8px above and below, less the 2px each line has.
+    // .log-body's 8px above and below.
     list := ListView {
-        y: 6px;
+        y: 8px;
         width: parent.width;
-        height: parent.height - 12px;
+        height: parent.height - 16px;
         // A screen reader reads the lines added out, as the console's aria-live="polite" does.
         accessible-label: "Log";
         accessible-live-region: polite;
@@ -144,16 +145,17 @@ component LogConsole inherits Rectangle {
                 root.to-newest();
             }
         }
-        // 12px mono at about style.css's 1.6 line height: 2px above and below each line.
+        // 12px mono at .log-body's 1.6 line height.
         for line in root.rows: Rectangle {
-            height: text.preferred-height + 4px;
+            height: text.preferred-height;
             text := Text {
                 x: 14px;
-                y: 2px;
+                y: 0;
                 width: parent.width - 28px;
                 text: line.text;
                 font-family: "JetBrains Mono";
                 font-size: 12px;
+                line-height-factor: Theme.lh-log;
                 wrap: word-wrap;
                 color: line.tone == LogTone.err ? Theme.err
                     : line.tone == LogTone.warn ? Theme.warn

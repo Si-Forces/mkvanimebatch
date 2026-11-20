@@ -191,12 +191,14 @@ component TelItem inherits Rectangle {
                 text: root.label;
                 color: Theme.mute;
                 font-size: 11px;
+                line-height-factor: Theme.lh-body;
             }
             Text {
                 text: root.value;
                 color: Theme.fg;
                 font-size: 12px;
                 font-weight: 600;
+                line-height-factor: Theme.lh-body;
             }
         }
     }
@@ -232,7 +234,8 @@ export component BottomBar inherits Rectangle {
         background: Theme.line;
     }
     bar := HorizontalLayout {
-        padding-top: 8px;
+        // .bar's 1px top border, then its 8px of padding.
+        padding-top: 9px;
         padding-bottom: 8px;
         padding-left: 14px;
         padding-right: 14px;
@@ -268,6 +271,7 @@ export component BottomBar inherits Rectangle {
                     color: Theme.fg;
                     font-size: 12px;
                     font-weight: 700;
+                    line-height-factor: Theme.lh-body;
                     overflow: elide;
                     horizontal-stretch: 1;
                 }
@@ -275,6 +279,7 @@ export component BottomBar inherits Rectangle {
                     text: root.job.clock;
                     color: Theme.mute;
                     font-size: 12px;
+                    line-height-factor: Theme.lh-body;
                 }
             }
             ProgressStack {
@@ -293,11 +298,13 @@ export component BottomBar inherits Rectangle {
                     text: root.workers;
                     color: Theme.mute;
                     font-size: 11px;
+                    line-height-factor: Theme.lh-body;
                 }
                 Text {
                     text: root.io-jobs;
                     color: Theme.mute;
                     font-size: 11px;
+                    line-height-factor: Theme.lh-body;
                 }
             }
             Tooltip {
@@ -402,12 +409,14 @@ export component ConfirmDialog inherits Rectangle {
                     color: Theme.fg;
                     font-size: 16px;
                     font-weight: 700;
+                    line-height-factor: Theme.lh-body;
                     wrap: word-wrap;
                     accessible-role: none;
                 }
                 Text {
                     text: root.texts.text;
                     color: Theme.mute;
+                    line-height-factor: Theme.lh-body;
                     wrap: word-wrap;
                     overflow: elide;
                     min-height: 0px;

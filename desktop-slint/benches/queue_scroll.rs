@@ -114,7 +114,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(66);
 const IN_FLIGHT: usize = 8;
 /// A row's and a release header's height in queue.slint.
 const ROW_H: f32 = 52.0;
-const HEAD_H: f32 = 30.0;
+const HEAD_H: f32 = 34.0;
 /// How many times `put_cost` times each kind of put.
 const PUT_RUNS: usize = 20;
 

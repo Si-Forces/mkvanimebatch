@@ -3289,11 +3289,11 @@ fn assert_row_in_view(app: &App, id: &str) {
         list.absolute_position().y,
         list.absolute_position().y + list.size().height,
     );
-    // The pinned header is a GroupHead, 30px tall.
+    // The pinned header is a GroupHead, 34px tall.
     let clear = if app.get_remux_pinned().is_empty() {
         top
     } else {
-        top + 30.0
+        top + 34.0
     };
     let pick = only(app, id);
     let (y, height) = (pick.absolute_position().y, pick.size().height);
@@ -3428,7 +3428,7 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
-    // 20 rows, 20 more, then 8 in a third release: 82px for its first row (with its header),
+    // 20 rows, 20 more, then 8 in a third release: 86px for its first row (with its header),
     // 52px for each other.
     let mut state = three_releases();
     let rows: Vec<Row> = (0..48)
@@ -3454,11 +3454,11 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
             .size()
             .height
     };
-    let height = 640.0 + 82.0 + 7.0 * 52.0 - list();
+    let height = 640.0 + 86.0 + 7.0 * 52.0 - list();
     app.window()
         .set_size(slint::LogicalSize::new(920.0, height));
     frame(&app);
-    assert_eq!(list(), 82.0 + 7.0 * 52.0);
+    assert_eq!(list(), 86.0 + 7.0 * 52.0);
 
     app.set_remux_scroll(-500.0);
     frame(&app);
@@ -4234,7 +4234,7 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         let text = app.get_remux_pinned();
         (!text.is_empty()).then(|| format!("{text} {}", app.get_remux_pinned_count()))
     };
-    let top = only(&app, "Include a00 in the batch").absolute_position().y - 30.0 - 18.0;
+    let top = only(&app, "Include a00 in the batch").absolute_position().y - 34.0 - 18.0;
 
     assert_eq!(pinned(&app), None, "the first header shows in place");
     app.set_remux_scroll(-500.0);
@@ -4245,6 +4245,12 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         .find(|head| head.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::None))
         .unwrap();
     assert_eq!(head.absolute_position().y, top, "at the list's top");
+    // .ep-group-head: 34px, its texts on the last 16px line, 6px above the bottom.
+    assert_eq!(head.size().height, 34.0, "the header's height");
+    for text in head.query_descendants().match_type_name("Text").find_all() {
+        let bottom = text.absolute_position().y + text.size().height;
+        assert_eq!(bottom, top + 28.0, "the header's text at its bottom");
+    }
 
     // A filter that hides the pinned release's rows unpins its header, and the count with it.
     publisher.show_filter(Mode::Remux, QueueFilter::Done);
@@ -4528,5 +4534,43 @@ fn the_appearance_button_reports_its_menu_expanded() {
     assert!(app.get_appearance_open());
     assert_eq!(button.accessible_expanded(), Some(true));
     assert_eq!(focused(&app), "Appearance");
+    app.hide().unwrap();
+}
+
+/// Text takes style.css's line heights (body 1.45, .nav-text 1.2, .log-body 1.6), each rounded
+/// up to a whole pixel, and the chips their box around it: the list header's title, chips and
+/// hint, a mode tab with a wrapped subtitle, and a log line that wraps.
+#[test]
+fn text_takes_the_webviews_line_heights() {
+    use mkv_anime_batch_slint_ui::{LogRow, LogTone};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    let line = "[12:00:00] a log line long enough to wrap onto a second line in the drawer";
+    app.set_remux_log(
+        Rc::new(slint::VecModel::from(vec![LogRow {
+            text: line.into(),
+            tone: LogTone::Plain,
+        }]))
+        .into(),
+    );
+    app.set_log_open(true);
+    app.show().unwrap();
+    frame(&app);
+    let height = |label: &str| only(&app, label).size().height;
+    // 18px × 1.45 = 26.1, 12px × 1.45 = 17.4.
+    assert_eq!(height("No folder open"), 27.0, "the title");
+    assert_eq!(
+        height("Tick episodes to include them. Click a row to inspect it."),
+        18.0,
+        "the hint"
+    );
+    // .chip: the 17.4px line in 4px of padding and a 1px border.
+    assert!((height("All 0") - 27.4).abs() < 0.01, "a chip");
+    // .nav-text: 13px and two 11px lines × 1.2 (16 + 27), in 7px of padding: .nav's 56px.
+    assert_eq!(height("Remux"), 56.0, "a mode tab");
+    // Two lines of 12px × 1.6 = 38.4.
+    assert_eq!(height(line), 39.0, "a log line on two lines");
     app.hide().unwrap();
 }

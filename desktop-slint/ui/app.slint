@@ -30,7 +30,9 @@ component ModeTab inherits Rectangle {
     callback clicked();
     callback settings();
     // .task-row .nav's 44px at least, taller when the subtitle wraps (its 7px padding each side).
-    height: max(44px, texts.preferred-height + 14px);
+    // Each text's height rounds up to a whole pixel, so 13px here keeps a wrapped subtitle's
+    // 56px: 16px + 27px for .nav-text's 15.6px + 26.4px.
+    height: max(44px, texts.preferred-height + 13px);
     border-radius: 8px;
     background: tab-area.hovered || gear.hovered ? Theme.hover : active ? Theme.sel : transparent;
     tab-area := Pressable {
@@ -76,6 +78,7 @@ component ModeTab inherits Rectangle {
                 text: root.title;
                 color: Theme.fg;
                 font-weight: 500;
+                line-height-factor: Theme.lh-nav;
                 overflow: elide;
                 accessible-role: none;
             }
@@ -84,6 +87,7 @@ component ModeTab inherits Rectangle {
                 text: root.subtitle;
                 color: Theme.mute;
                 font-size: 11px;
+                line-height-factor: Theme.lh-nav;
                 wrap: word-wrap;
                 accessible-role: none;
             }
@@ -108,12 +112,14 @@ component SideHeading inherits VerticalLayout {
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.77px;
+        line-height-factor: Theme.lh-body;
     }
 }
 
 // The Library's "+ Open folder…" (.nav.lib-open): a muted nav row, locked while a batch runs.
 component OpenFolderNav inherits Pressable {
-    height: 32px;
+    // .nav: a 13px line (× 1.45) in 7px of padding.
+    height: 13px * 1.45 + 14px;
     border-radius: 8px;
     background: self.hovered && self.enabled ? Theme.hover : transparent;
     opacity: self.enabled ? 1 : 0.75;
@@ -581,6 +587,7 @@ export component App inherits Window {
                             side := VerticalLayout {
                                 width: parent.width;
                                 padding-top: 14px;
+                                padding-bottom: 14px;
                                 padding-left: 10px;
                                 padding-right: 10px;
                                 spacing: 2px;
@@ -614,14 +621,19 @@ export component App inherits Window {
                                     }
                                     settings => { root.open-from-gear(Mode.extract); }
                                 }
-                                // .side's 18px gap between groups, less the group's own 2px spacing.
-                                Rectangle { height: 16px; }
+                                // .side's 18px gap between groups, less the 2px spacing on each side.
+                                Rectangle { height: 14px; }
                                 SideHeading { text: "LIBRARY"; }
-                                for item in root.library: LibraryEntry {
-                                    item: item;
-                                    clicked => {
-                                        root.leave-field();
-                                        root.reveal-release(item.release, item.root);
+                                // .library-tree: a cell even when empty, as the webview's empty
+                                // div takes the group's 2px gap on each side.
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    for item in root.library: LibraryEntry {
+                                        item: item;
+                                        clicked => {
+                                            root.leave-field();
+                                            root.reveal-release(item.release, item.root);
+                                        }
                                     }
                                 }
                                 OpenFolderNav {
@@ -634,7 +646,7 @@ export component App inherits Window {
                                 // The Preset Profiles (#preset-list), remux's only.
                                 if root.mode == Mode.remux: VerticalLayout {
                                     spacing: 2px;
-                                    Rectangle { height: 16px; }
+                                    Rectangle { height: 14px; }
                                     HorizontalLayout {
                                         spacing: 8px;
                                         SideHeading { text: "PRESET"; }
