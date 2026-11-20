@@ -23,7 +23,9 @@
 //! 1000 rows into the empty model; `filter_ms` the hop of a filter change to Failed at the end,
 //! which writes nearly every row (the bench maps it on the UI thread before the timed hop; the app
 //! maps it off the UI thread), and `filter_frame` the render and interval of the frame drawn after
-//! it, where the ListView lays out the rows the filter hid at 0 px. The Library is the core's for
+//! it, where the ListView lays out the rows the filter hid at 0 px. Its render runs from winit's
+//! `RedrawRequested`, not `BeforeRendering`: Slint instantiates and lays out the ListView's rows
+//! before it calls the notifier (`WindowInner::draw_contents`, `ensure_tree_instantiated`). The Library is the core's for
 //! these rows, so each release's group header is its own. `interval_ms` is the time between
 //! presented frames (vsync-bound, so a hair over 16.67 ms is jitter, and over 25 ms a missed
 //! vsync); `render_ms` each frame's rendering on the UI thread.
@@ -82,14 +84,18 @@ mod telemetry;
 use mkv_anime_batch_slint_ui::{App, Mode, QueueFilter, Theme};
 use mkv_desktop_core::actor::{ModeView, ViewState};
 use mkv_desktop_core::presentation::{
-    bucket, library, status_label, status_title, status_tone, Tone,
+    bucket, filter_counts, library, status_label, status_title, status_tone, Tone,
 };
 use mkv_desktop_core::queue::Row;
 use mkv_desktop_core::snapshot::ItemStatus;
 use mkv_desktop_core::telemetry::{TelemetryData, TelemetryView};
 use publisher::Coalescer;
+use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, RenderingState};
+use std::cell::Cell;
 use std::error::Error;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -265,6 +271,7 @@ fn spawn_churn(
             state.remux.clock = format!("{}:{:02} elapsed", second / 60, second % 60);
             state.remux.progress.done = done as f64 * 100.0 / rows.len() as f64;
             state.remux.progress.live = started.len() as f64 * 100.0 / rows.len() as f64;
+            state.remux.filters = filter_counts(&rows);
             state.remux.rows = Arc::new(rows.clone());
             let resetting = reset.load(Ordering::Relaxed) && in_flight.load(Ordering::Acquire) == 0;
             if resetting {
@@ -364,6 +371,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     state.remux.empty = None;
     state.remux.manifest_rev = 1;
     state.remux.library = library(Some("/media/anime"), &rows);
+    state.remux.filters = filter_counts(&rows);
     state.remux.rows = Arc::new(rows);
     let put = put_cost(&state.remux);
 
@@ -419,6 +427,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     );
 
+    // When the frame started, for `filter_frame`: winit's RedrawRequested, before Slint's layout.
+    let redraw = Rc::new(Cell::new(Instant::now()));
+    let redraw_at = Rc::clone(&redraw);
+    app.window().on_winit_window_event(move |_, event| {
+        if matches!(event, WindowEvent::RedrawRequested) {
+            redraw_at.set(Instant::now());
+        }
+        EventResult::Propagate
+    });
     let weak = app.as_weak();
     let (mut first, mut before, mut last) = (None::<Instant>, Instant::now(), None::<Instant>);
     let (mut intervals, mut renders) = (Vec::new(), Vec::new());
@@ -446,7 +463,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             if let Some((mut hops, mut maps, filter)) = ended.take() {
                 // The frame after the filter change (P2-R3-04), outside the window's figures.
-                let filter_render = ms(now.duration_since(before));
+                let filter_render = ms(now.duration_since(redraw.get()));
                 let filter_interval = last.map_or(f64::NAN, |last| ms(now.duration_since(last)));
                 reported = true;
                 let over = |ms: f64| intervals.iter().filter(|&&i| i > ms).count();
