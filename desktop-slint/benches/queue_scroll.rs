@@ -16,10 +16,6 @@
 //! MKV_BENCH_BLUR=1 cargo bench -p mkv-anime-batch-slint --bench queue_scroll          # real blur
 //! ```
 //!
-//! Each `cargo bench` builds the UI crate again (slint-build watches a `slint-project.json` that
-//! does not exist), with the release profile's LTO; to repeat a run, start the executable it
-//! printed (`target/release/deps/queue_scroll-*`) directly.
-//!
 //! `map_ms` is each publication's push on the publishing thread, off the UI thread: the rows
 //! mapped, then the diff against the model under the coalescer's lock. `pub_ms` is the UI-thread
 //! time of each publication's hop (the take and the model writes), not the layout those writes
@@ -47,7 +43,9 @@
 //! telemetry; P9 (#142) runs the gate itself. Decision 8 defines its numbers on the real blur,
 //! drawn with `MKV_BENCH_BLUR=1` (`glass_frame=blur:1` in the line); without, the faked glass the
 //! app ships is read by the same numbers. The line ends with PASS or FAIL for each, or
-//! INSUFFICIENT when the run has too few samples to judge it (under two publications, no frame).
+//! INSUFFICIENT when the run has too few samples to judge it (under two publications, no frame,
+//! no glass frame). The floor only catches an empty or one-hop run: a handful of samples still
+//! reads PASS or FAIL, so read the counts beside a verdict.
 
 // Only the hop's path is driven here; the rest of these host modules is unused. `clippy
 // --all-targets` checks a bench with cfg(test) but without its #[test] items, which leaves their

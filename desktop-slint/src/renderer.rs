@@ -91,7 +91,9 @@ pub enum GpuStart {
     Pending,
     /// A frame was drawn: OpenGL works.
     Drew,
-    /// No window by the deadline: the surface failed and Slint idles with the error.
+    /// No window by the deadline: the surface failed and Slint kept the error without ending the
+    /// loop. A backstop at Slint 1.19.0, which ends the loop with the error itself (ADR-0017,
+    /// 2026-11-20 amendment).
     NoWindow,
 }
 
