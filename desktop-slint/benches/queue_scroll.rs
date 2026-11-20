@@ -430,7 +430,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     );
 
-    // When the frame started, for `filter_frame`: winit's RedrawRequested, before Slint's layout.
+    // When the frame started, for `filter_frame` and `run_reset_frame`: winit's RedrawRequested,
+    // before Slint's layout.
     let redraw = Rc::new(Cell::new(Instant::now()));
     let redraw_at = Rc::clone(&redraw);
     app.window().on_winit_window_event(move |_, event| {
