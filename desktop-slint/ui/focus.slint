@@ -215,8 +215,8 @@ export component Pressable inherits Rectangle {
 // Theme.hint while the field is empty, focused too, until a key is typed or an input method
 // composes, as the webview's. Any focus draws the ring: `:focus-visible` matches a focused text
 // input whether a key or the pointer focused it.
-// It follows Slint's internal/compiler/widgets/common/lineedit-base.slint at 45cb2b3: diff it
-// against that file when the Slint pin moves.
+// It follows Slint's internal/compiler/widgets/common/lineedit-base.slint at 1.19.0 (unchanged
+// since 45cb2b3): diff it against that file when the Slint pin moves.
 export component TextField inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder;

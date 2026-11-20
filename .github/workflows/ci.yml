@@ -225,6 +225,19 @@ jobs:
             exit 1
           fi
 
+      # The `no-compile` guard (desktop-slint/ui/Cargo.toml) holds only on the skia-bindings Slint
+      # builds: after a Slint bump the pin must move to the version Slint resolves.
+      - name: Check skia-bindings matches its no-compile pin
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          pin=$(sed -n 's/^skia-bindings = { version = "=\([0-9.]*\)".*"no-compile".*/\1/p' desktop-slint/ui/Cargo.toml)
+          locked=$(awk '/^name = "skia-bindings"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' Cargo.lock | paste -sd ' ' -)
+          if [ -z "$pin" ] || [ "$locked" != "$pin" ]; then
+            echo "::error::Cargo.lock holds skia-bindings '$locked' but desktop-slint/ui/Cargo.toml pins '=$pin' with no-compile"
+            exit 1
+          fi
+
       - name: Run Clippy linter
         working-directory: ${{ env.BUILD_DIR }}
         run: cargo clippy -p mkv-anime-batch-slint -p mkv-anime-batch-slint-ui --all-targets -- -D warnings

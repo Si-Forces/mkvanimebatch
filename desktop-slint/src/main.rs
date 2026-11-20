@@ -242,12 +242,13 @@ fn run(
 /// this timer as much as the window.
 const WINDOW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Watches an OpenGL start. A failed OpenGL surface ends the event loop with an error when
-/// Slint creates the window as it resumes, but when it creates it later (after the appearance
-/// wait) Slint keeps the error and idles with no window (ADR-0017, renderer fallback amendment).
-/// So: the first drawn frame marks `Drew` (and forgets a saved software choice when
-/// `forget` names its directory); no window by [`WINDOW_DEADLINE`] marks `NoWindow` and quits
-/// the loop, which then returns the error Slint kept.
+/// Watches an OpenGL start. At Slint 1.19.0 a failed OpenGL surface ends the event loop with an
+/// error whether Slint creates the window as it resumes or later, after the appearance wait
+/// (ADR-0017, 2026-11-20 amendment); at 45cb2b3 the later path kept the error and idled with no
+/// window, so the deadline below stays as a backstop. The first drawn frame marks `Drew` (and
+/// forgets a saved software choice when `forget` names its directory); no window by
+/// [`WINDOW_DEADLINE`] marks `NoWindow` and quits the loop, which then returns any error Slint
+/// kept.
 fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
     let drawn = Rc::clone(&start);
     let forgetting = forget.is_some();
@@ -417,7 +418,8 @@ fn start_close(
 
 /// Minimizes through winit. Slint caches `minimized` and only calls winit when it changes, but on
 /// Wayland winit cannot report the minimized state, so after a restore the cache stays set and
-/// every later minimize is dropped (ADR-0017 decision 4).
+/// every later minimize is dropped (ADR-0017 decision 4). Re-checked at Slint 1.19.0: still so
+/// (`winitwindowadapter.rs` caches it, and winit 0.30.13's Wayland `is_minimized` is `None`).
 fn minimize(app: &App) {
     app.window()
         .with_winit_window(|window| window.set_minimized(true));
