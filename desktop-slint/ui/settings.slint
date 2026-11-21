@@ -3,10 +3,10 @@
 // bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
-import { Button, ScrollView, Slider } from "std-widgets.slint";
+import { Button, ScrollView } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { CheckBox, Focus, Pressable, Select, TextField, TipCard } from "focus.slint";
+import { CheckBox, Focus, Pressable, Select, Slider, TextField, TipCard } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -233,6 +233,9 @@ component Field inherits Rectangle {
     in property <string> label;
     in property <bool> required;
     in property <string> tip;
+    // Suppresses the hover tooltip while an inner control (the complexity slider) is pressed or
+    // dragged and until the pointer leaves it, matching a browser's `title` tooltip.
+    in property <bool> tip-quiet;
     // Columns of fields share the width evenly (.grid-2, .grid-3).
     min-width: 0px;
     preferred-width: 0px;
@@ -263,7 +266,7 @@ component Field inherits Rectangle {
         @children
     }
     // Last, so it is over the field: it watches the pointer and passes every event on.
-    if root.tip != "": Tooltip {
+    if root.tip != "" && !root.tip-quiet: Tooltip {
         TipCard {
             text: root.tip;
         }
@@ -347,8 +350,9 @@ component FolderField inherits Field {
         }
         Button {
             text: "Browse…";
-            // Inert under the dialog (only the sheet has folder fields), as the sheet's other
-            // fluent widgets: their screen reader actions ignore anything but `enabled`.
+            // Inert under the dialog (only the sheet has folder fields); Browse… is the sheet's
+            // only remaining fluent widget, and fluent's screen-reader actions ignore anything but
+            // `enabled`.
             enabled: root.enabled && !root.dialog-open;
             accessible-label: "Browse for the " + root.label;
             changed has-focus => {
@@ -496,12 +500,18 @@ export component SettingsSheet inherits GlassPane {
     // The height the head and every section take, unscrolled.
     out property <length> natural-height: head.preferred-height + 1px + body.preferred-height;
 
-    // The slider's value, which follows the typed complexity while it reads as a number.
+    // The slider's value, which follows the typed complexity (clamped and snapped to the range)
+    // while it reads as a number; the box keeps the raw draft text.
     property <float> complexity: 5;
     changed form => { self.follow(); }
     function follow() {
         if root.form.complexity.is-float() {
-            root.complexity = root.form.complexity.to-float();
+            let raw = root.form.complexity.to-float();
+            if root.limits.complexity-max > root.limits.complexity-min {
+                root.complexity = Math.round(clamp(raw, root.limits.complexity-min, root.limits.complexity-max));
+            } else {
+                root.complexity = Math.round(raw);
+            }
         }
     }
     // Done takes the focus unless a field took it for `Sheet.focus-key`: on opening, and again
@@ -752,6 +762,7 @@ export component SettingsSheet inherits GlassPane {
                             Field {
                                 label: "Encoder complexity";
                                 tip: root.limits.complexity-tip;
+                                tip-quiet: complexity-slider.tip-quiet;
                                 HorizontalLayout {
                                     spacing: 6px;
                                     Rectangle {
@@ -759,24 +770,20 @@ export component SettingsSheet inherits GlassPane {
                                         border-radius: 6px;
                                         border-width: root.invalid == "complexity" ? 2px : 0px;
                                         border-color: Theme.err;
-                                        Slider {
+                                        complexity-slider := Slider {
                                             x: 4px;
+                                            y: (parent.height - self.height) / 2;
                                             width: parent.width - 8px;
                                             minimum: root.limits.complexity-min;
                                             maximum: root.limits.complexity-max;
                                             step: 1;
                                             value <=> root.complexity;
-                                            // Inert under the dialog, as Browse….
-                                            enabled: !root.locked && !root.dialog-open;
+                                            enabled: !root.locked;
+                                            layer: 1;
                                             accessible-label: "Encoder complexity";
                                             accessible-description: root.limits.complexity-tip;
-                                            // Whole steps alone, as a range input's: fluent's
-                                            // drag does not snap to `step`.
-                                            changed(value) => {
-                                                let step = Math.round(value);
-                                                self.value = step;
-                                                Sheet.slid(step);
-                                            }
+                                            // Whole steps alone: Slider snaps drags, keys and a11y edits.
+                                            changed(value) => { Sheet.slid(value); }
                                             released => { Sheet.committed("complexity"); }
                                             // A focus id of its own, so moving between the
                                             // slider and the box leaves one and enters the other.

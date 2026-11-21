@@ -1133,6 +1133,109 @@ fn the_number_fields_and_the_complexity_show_their_tooltips_on_hover() {
     app.hide().unwrap();
 }
 
+/// Pressing the complexity slider hides the wrapping Field's tooltip immediately (so it does not
+/// cover the track while dragging) and keeps it hidden after release until the pointer leaves and
+/// returns, matching a browser's `title` tooltip.
+#[test]
+fn complexity_slider_press_hides_field_tooltip_until_pointer_leaves() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let tip = crate::settings::limits().complexity_tip;
+    let shown = || ElementHandle::find_by_accessible_label(&app, &tip).count();
+    let slider = only(&app, "Encoder complexity");
+    let (at, size) = (slider.absolute_position(), slider.size());
+    let center = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    let outside = slint::LogicalPosition::new(1.0, 1.0);
+
+    // Plain hover shows the tooltip.
+    hover_at(&app, outside);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(shown(), 1, "tooltip shows on plain hover");
+
+    // Pressing the slider hides the tooltip at once, and dragging (even vertically outside the
+    // slider's own height, still inside the Field) keeps it hidden.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    assert_eq!(shown(), 0, "tooltip hides immediately on slider press");
+
+    let dragged = slint::LogicalPosition::new(at.x + size.width * 0.75, at.y - 6.0);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: dragged });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(shown(), 0, "tooltip stays hidden while dragging");
+
+    // Releasing while over the slider keeps the tooltip hidden until the pointer leaves.
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        0,
+        "tooltip stays hidden after release while pointer remains over slider"
+    );
+
+    let nudged = slint::LogicalPosition::new(center.x + 4.0, center.y);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: nudged });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        0,
+        "tooltip stays hidden on movement within slider before leaving"
+    );
+
+    // Leaving and returning restores the hover tooltip.
+    hover_at(&app, outside);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        1,
+        "tooltip returns after pointer leaves and re-enters slider"
+    );
+
+    // Dragging off the slider and releasing outside must not leave tip-quiet latched.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: outside });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: outside,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        1,
+        "releasing outside slider clears tip-quiet for next hover"
+    );
+
+    app.hide().unwrap();
+}
+
 /// The text input inside the field labelled `label`.
 fn text_input_of(app: &App, label: &str) -> ElementHandle {
     let mut found = only(app, label)
@@ -5243,5 +5346,235 @@ fn custom_checkboxes_toggle_with_space_and_report_accessibility() {
     key(&app, Key::Space);
     assert!(theme.get_reduce_motion());
     assert_eq!(rm.accessible_checked(), Some(true));
+    app.hide().unwrap();
+}
+
+/// The custom teal complexity slider exposes horizontal slider accessibility (value/min/max/step),
+/// responds to Left/Right/Up/Down/Home/End keys, snaps pointer drags, commits only on real changes
+/// (including cancelled drags), clamps out-of-range mirrored box values, and restores focus after a
+/// dialog over the sheet closes.
+#[test]
+fn custom_complexity_slider_handles_keys_drag_and_accessibility() {
+    use i_slint_backend_testing::{AccessibleRole, Orientation};
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let slid = Rc::new(RefCell::new(Vec::<f32>::new()));
+    let slid_log = Rc::clone(&slid);
+    app.global::<Sheet>()
+        .on_slid(move |value| slid_log.borrow_mut().push(value));
+    let committed = Rc::new(RefCell::new(Vec::<String>::new()));
+    let commit_log = Rc::clone(&committed);
+    app.global::<Sheet>()
+        .on_committed(move |key| commit_log.borrow_mut().push(key.into()));
+
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let slider = ElementHandle::find_by_accessible_label(&app, "Encoder complexity")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+        .expect("the complexity slider");
+    assert_eq!(
+        slider.accessible_orientation(),
+        Some(Orientation::Horizontal)
+    );
+    assert_eq!(slider.accessible_value().as_deref(), Some("5"));
+    assert_eq!(slider.accessible_value_minimum(), Some(0.0));
+    assert_eq!(slider.accessible_value_maximum(), Some(10.0));
+    assert_eq!(slider.accessible_value_step(), Some(1.0));
+
+    // Pointer press at ~34% of the track focuses the slider and snaps to 3; drag to ~78% snaps to 8.
+    let (at, size) = (slider.absolute_position(), slider.size());
+    let track = size.width - 16.0;
+    let y = at.y + size.height / 2.0;
+    let pos = |frac: f32| slint::LogicalPosition::new(at.x + 8.0 + track * frac, y);
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.34),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("3"));
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: pos(0.32),
+    });
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: pos(0.78),
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("8"));
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.78),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(*slid.borrow(), [3.0, 8.0]);
+    assert_eq!(*committed.borrow(), ["complexity"]);
+
+    // Left, Right, Up, Down, Home and End keys step/jump and commit on key release.
+    key(&app, Key::RightArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+    key(&app, Key::LeftArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("8"));
+    key(&app, Key::UpArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+    key(&app, Key::DownArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("8"));
+    key(&app, Key::Home);
+    assert_eq!(slider.accessible_value().as_deref(), Some("0"));
+    // No-op at minimum (Home at 0) commits nothing.
+    let before_noop = committed.borrow().len();
+    key(&app, Key::Home);
+    assert_eq!(
+        committed.borrow().len(),
+        before_noop,
+        "Home at min must not commit"
+    );
+    key(&app, Key::End);
+    assert_eq!(slider.accessible_value().as_deref(), Some("10"));
+    assert_eq!(*slid.borrow(), [3.0, 8.0, 9.0, 8.0, 9.0, 8.0, 0.0, 10.0]);
+    assert_eq!(*committed.borrow(), vec!["complexity"; 7]);
+
+    // No-op a11y increment at maximum commits nothing.
+    slider.invoke_accessible_increment_action();
+    assert_eq!(
+        committed.borrow().len(),
+        7,
+        "increment at max must not commit"
+    );
+
+    // Screen-reader decrement, increment, and set-value actions step and commit when changed.
+    slider.invoke_accessible_decrement_action();
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+    slider.invoke_accessible_increment_action();
+    assert_eq!(slider.accessible_value().as_deref(), Some("10"));
+    slider.set_accessible_value("4.4");
+    assert_eq!(slider.accessible_value().as_deref(), Some("4"));
+    assert_eq!(*committed.borrow(), vec!["complexity"; 10]);
+
+    // No-op pointer click+release on the current value (4) commits nothing.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        10,
+        "pointer click at current value must not commit"
+    );
+
+    // Interrupted drag (PointerExited sends Cancel with button == Other): ends drag once,
+    // commits once, and subsequent moves no longer drag.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.2),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("2"));
+    app.window().dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(
+        committed.borrow().len(),
+        11,
+        "PointerExited cancel commits once"
+    );
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.9) });
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("2"),
+        "cancelled drag stops tracking"
+    );
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.9),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        11,
+        "release after cancel does not double-commit"
+    );
+
+    // Locking mid-drag (busy -> live turns false): ends the drag silently without emitting
+    // `released` (so the host does not send a second EditDraft after the lock), and unlocking
+    // leaves dragging cleared.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.6),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("6"));
+    let mut locked = ViewState::new(None);
+    locked.busy = true;
+    apply(&app, &locked);
+    frame(&app);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.8) });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.8),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        11,
+        "locking mid-drag must end silently without committing"
+    );
+    apply(&app, &ViewState::new(None));
+    frame(&app);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.9) });
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("6"),
+        "drag stays cleared after unlocking"
+    );
+
+    // Out-of-range draft text in the complexity box ("15") stays "15" in the form while follow()
+    // clamps the slider to 10: increment at the displayed maximum must emit neither slid nor
+    // committed (it would fire both if follow() left 15 in the slider), then decrement lands on 9.
+    let mut form = app.get_remux_form();
+    form.complexity = "15".into();
+    app.set_remux_form(form);
+    frame(&app);
+    assert_eq!(app.get_remux_form().complexity, "15");
+    assert_eq!(slider.accessible_value().as_deref(), Some("10"));
+    let slid_before_inc = slid.borrow().len();
+    let committed_before_inc = committed.borrow().len();
+    slider.invoke_accessible_increment_action();
+    assert_eq!(
+        slid.borrow().len(),
+        slid_before_inc,
+        "increment at clamped max must not fire slid"
+    );
+    assert_eq!(
+        committed.borrow().len(),
+        committed_before_inc,
+        "increment at clamped max must not fire committed"
+    );
+    slider.invoke_accessible_decrement_action();
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+
+    // Focus returns to the slider after a dialog over the sheet closes.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.5),
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.5),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("5"));
+    assert_eq!(focused(&app), "Encoder complexity");
+    app.invoke_show_dialog();
+    frame(&app);
+    app.set_dialog_open(false);
+    frame(&app);
+    assert_eq!(focused(&app), "Encoder complexity");
+    key(&app, Key::RightArrow);
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("6"),
+        "slider still has focus after dialog over sheet closes"
+    );
     app.hide().unwrap();
 }

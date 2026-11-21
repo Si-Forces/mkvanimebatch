@@ -284,6 +284,255 @@ export component CheckBox inherits Pressable {
     }
 }
 
+// A teal range slider (.range-row input[type="range"]): 4px Theme.line track, Theme.accent fill,
+// 16px thumb, snapping drags, Left/Right/Up/Down/Home/End keys and screen-reader edits to whole
+// steps, and respecting modal layers (`layer`) without dimming under a dialog.
+export component Slider inherits Rectangle {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> step: 1;
+    in-out property <float> value: minimum;
+    in property <bool> enabled: true;
+    in property <int> layer;
+    in property <string> focus-key: self.accessible-label;
+    out property <bool> has-focus: keys.has-focus;
+    out property <bool> ring: keys.has-focus && Focus.keyboard;
+    out property <bool> live: root.enabled && root.layer >= Focus.modal;
+    // Latched on a left press until the drag ends and the pointer leaves the slider, so a
+    // wrapping Field's hover Tooltip hides on press and stays hidden like a browser `title`.
+    out property <bool> tip-quiet: touch.tip-quiet;
+    callback changed(value: float);
+    callback released(value: float);
+
+    property <length> thumb-size: 16px;
+    property <float> effective-step: root.step > 0 ? root.step : 1;
+    property <float> span: max(0.0001, root.maximum - root.minimum);
+    property <float> fraction: clamp((root.value - root.minimum) / self.span, 0, 1);
+
+    function snap(raw: float) -> float {
+        let clamped = clamp(raw, root.minimum, root.maximum);
+        let s = root.effective-step;
+        clamp(root.minimum + Math.round((clamped - root.minimum) / s) * s, root.minimum, root.maximum)
+    }
+
+    function set-stepped(raw: float) -> bool {
+        if !root.live {
+            return false;
+        }
+        let next = root.snap(raw);
+        if next != root.value {
+            root.value = next;
+            root.changed(next);
+            return true;
+        }
+        false
+    }
+
+    function end-drag(commit: bool) {
+        if touch.dragging {
+            touch.dragging = false;
+            let moved = root.value != touch.drag-start;
+            touch.drag-start = root.value;
+            if !touch.has-hover {
+                touch.tip-quiet = false;
+            }
+            if commit && moved {
+                root.released(root.value);
+            }
+        }
+    }
+
+    function value-at(x: length) -> float {
+        let track = root.width - root.thumb-size;
+        let frac = track > 0px ? clamp((x - root.thumb-size / 2) / track, 0.0, 1.0) : 0.0;
+        root.minimum + frac * (root.maximum - root.minimum)
+    }
+
+    min-width: 0px;
+    horizontal-stretch: 1;
+    height: 24px;
+    border-radius: 6px;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    forward-focus: keys;
+    accessible-role: slider;
+    accessible-orientation: Orientation.horizontal;
+    accessible-enabled: root.live;
+    accessible-value: root.snap(root.value);
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.effective-step;
+    accessible-action-set-value(v) => {
+        if root.live && v.is-float() && root.set-stepped(v.to-float()) {
+            root.released(root.value);
+        }
+    }
+    accessible-action-increment => {
+        if root.live && root.set-stepped(root.snap(root.value) + root.effective-step) {
+            root.released(root.value);
+        }
+    }
+    accessible-action-decrement => {
+        if root.live && root.set-stepped(root.snap(root.value) - root.effective-step) {
+            root.released(root.value);
+        }
+    }
+
+    property <int> restore: Focus.restore-serial;
+    changed restore => {
+        if root.live && root.focus-key != "" && Focus.restore-key == root.focus-key {
+            keys.focus();
+        }
+    }
+    changed live => {
+        if !self.live {
+            // Locked or inert mid-drag (batch started, dialog opened): end silently so we do not
+            // emit `released` and send a second EditDraft after the lock.
+            root.end-drag(false);
+            keys.key-changed = false;
+        }
+    }
+
+    keys := FocusScope {
+        enabled: root.live;
+        property <bool> key-changed;
+        focus-gained(reason) => {
+            Focus.current = root.focus-key;
+            Focus.follow-key = "";
+            if reason == FocusReason.tab-navigation {
+                Focus.keyboard = true;
+            }
+        }
+        focus-lost => {
+            self.key-changed = false;
+            if Focus.current == root.focus-key {
+                Focus.current = "";
+            }
+        }
+        key-pressed(event) => {
+            if !root.live {
+                return reject;
+            }
+            if event.text == Key.RightArrow || event.text == Key.UpArrow {
+                if root.set-stepped(root.snap(root.value) + root.effective-step) {
+                    self.key-changed = true;
+                }
+                return accept;
+            }
+            if event.text == Key.LeftArrow || event.text == Key.DownArrow {
+                if root.set-stepped(root.snap(root.value) - root.effective-step) {
+                    self.key-changed = true;
+                }
+                return accept;
+            }
+            if event.text == Key.Home {
+                if root.set-stepped(root.minimum) {
+                    self.key-changed = true;
+                }
+                return accept;
+            }
+            if event.text == Key.End {
+                if root.set-stepped(root.maximum) {
+                    self.key-changed = true;
+                }
+                return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if !root.live {
+                return reject;
+            }
+            if event.text == Key.RightArrow || event.text == Key.LeftArrow
+                || event.text == Key.UpArrow || event.text == Key.DownArrow
+                || event.text == Key.Home || event.text == Key.End {
+                if self.key-changed {
+                    self.key-changed = false;
+                    root.released(root.value);
+                }
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // Track (4px Theme.line).
+    Rectangle {
+        x: root.thumb-size / 2;
+        y: (parent.height - self.height) / 2;
+        width: max(0px, parent.width - root.thumb-size);
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.line;
+    }
+
+    // Active fill (4px Theme.accent).
+    Rectangle {
+        x: root.thumb-size / 2;
+        y: (parent.height - self.height) / 2;
+        width: max(0px, parent.width - root.thumb-size) * root.fraction;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+
+    // Thumb (16px Theme.accent, no drop shadow: style.css has none on input[type="range"]).
+    Rectangle {
+        x: max(0px, parent.width - root.thumb-size) * root.fraction;
+        y: (parent.height - self.height) / 2;
+        width: root.thumb-size;
+        height: root.thumb-size;
+        border-radius: self.width / 2;
+        background: Theme.accent;
+    }
+
+    touch := TouchArea {
+        enabled: root.live;
+        // style.css sets cursor: pointer on buttons only, not input[type="range"].
+        mouse-cursor: root.enabled ? MouseCursor.default : not-allowed;
+        property <bool> dragging;
+        property <float> drag-start;
+        out property <bool> tip-quiet;
+        changed has-hover => {
+            if !self.has-hover && !self.dragging {
+                self.tip-quiet = false;
+            }
+        }
+        pointer-event(event) => {
+            // PointerEventKind.cancel arrives with button == other, so handle it before the
+            // live/button filter; commit once only while still live (locking mid-drag ends
+            // silently without a second EditDraft).
+            if event.kind == PointerEventKind.cancel {
+                root.end-drag(root.live);
+                return;
+            }
+            if !root.live || event.button != PointerEventButton.left {
+                return;
+            }
+            if event.kind == PointerEventKind.down {
+                Focus.keyboard = false;
+                keys.focus();
+                self.tip-quiet = true;
+                self.dragging = true;
+                self.drag-start = root.value;
+                root.set-stepped(root.value-at(self.mouse-x));
+            } else if event.kind == PointerEventKind.up {
+                root.end-drag(true);
+            }
+        }
+        moved => {
+            if self.dragging && root.live {
+                root.set-stepped(root.value-at(self.mouse-x));
+            }
+        }
+    }
+
+    if root.ring: FocusRing {
+        around-width: root.width;
+        around-height: root.height;
+        radius: root.border-radius;
+    }
+}
+
 // A text field (index.html's `<input>`, style.css `.field`): a bare TextInput in the field's box,
 // with no clear button, as the webview's input has none. Like the std LineEdit it has a context
 // menu (Undo, Redo, Cut, Copy, Paste, Select All), keeps the caret in view by scrolling a text

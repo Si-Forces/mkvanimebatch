@@ -352,7 +352,9 @@ export component App inherits Window {
         if !root.dialog-open {
             root.dialog-return = root.appearance-open ? "Appearance" : Focus.current;
             root.appearance-open = false;
-            root.dialog-field = Sheet.focused;
+            // The complexity slider restores through Focus.restore (its focus-key is its accessible
+            // label); Sheet.focused == "complexity_slider" is only for DraftKey write-back.
+            root.dialog-field = Sheet.focused == "complexity_slider" ? "" : Sheet.focused;
             root.dialog-open = true;
         }
     }
