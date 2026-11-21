@@ -5092,3 +5092,156 @@ fn glass_pane_near_shadow_keeps_full_strength_under_translucent_fills() {
     }
     app.hide().unwrap();
 }
+
+/// The shared teal CheckBox in the settings sheet and Appearance menu keeps checkbox accessibility,
+/// toggles on Space only (not Return), outlines only its 16px box on keyboard focus, and paints
+/// its 16px box in `Theme.accent` when checked.
+#[test]
+fn custom_checkboxes_toggle_with_space_and_report_accessibility() {
+    use i_slint_backend_testing::testing_backend::TestingWindow;
+    use i_slint_backend_testing::AccessibleRole;
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    use i_slint_core::window::WindowInner;
+    use slint::platform::Key;
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1200.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let edited = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&edited);
+    app.global::<Sheet>()
+        .on_edited(move |key| log.borrow_mut().push(key.into()));
+
+    // Sheet checkboxes: Shift+Tab from Done lands on Clear inspection cache, then Bypass cache,
+    // then Dry run; Space toggles each (Return does not) and updates accessible-checked.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let dry_run = only(&app, "Dry run (plan only, write nothing)");
+    let no_cache = only(&app, "Bypass inspection cache");
+    assert_eq!(dry_run.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(no_cache.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(dry_run.accessible_checked(), Some(false));
+    assert_eq!(no_cache.accessible_checked(), Some(false));
+
+    key(&app, Key::Backtab); // Clear inspection cache
+    key(&app, Key::Backtab); // Bypass inspection cache
+    assert_eq!(focused(&app), "Bypass inspection cache");
+
+    // Keyboard focus ring wraps only the 16x16 box (2px gap + 2px border => 24x24), not the row.
+    let ring = ElementHandle::find_by_element_type_name(&app, "FocusRing")
+        .find(|el| el.size().width > 0.0 && el.size().height > 0.0)
+        .expect("focused CheckBox FocusRing");
+    assert_eq!(
+        ring.size(),
+        slint::LogicalSize::new(24.0, 24.0),
+        "CheckBox focus ring must outline the 16px box, not the label row"
+    );
+
+    // Return must not toggle a checkbox (native <input type=checkbox> toggles on Space only).
+    key(&app, Key::Return);
+    assert!(!app.get_remux_form().no_cache);
+    assert_eq!(no_cache.accessible_checked(), Some(false));
+
+    key(&app, Key::Space);
+    assert!(app.get_remux_form().no_cache);
+    assert_eq!(no_cache.accessible_checked(), Some(true));
+
+    // Checked box renders in Theme.accent (teal), not fluent's system accent blue.
+    frame(&app);
+    let shot = app.window().take_snapshot().unwrap();
+    let accent = app.global::<Theme>().get_accent();
+    let (at, size) = (no_cache.absolute_position(), no_cache.size());
+    // Top-left corner pixel inside the 16x16 box (centered vertically inside the checkbox row),
+    // clear of the white checkmark stroke.
+    let bx = (at.x + 2.0).round() as u32;
+    let by = (at.y + (size.height - 16.0) / 2.0 + 2.0).round() as u32;
+    let px = shot.as_slice()[(by * shot.width() + bx) as usize];
+    assert!(
+        px.r.abs_diff(accent.red()) <= 3
+            && px.g.abs_diff(accent.green()) <= 3
+            && px.b.abs_diff(accent.blue()) <= 3,
+        "expected Theme.accent {:?} in 16px checkbox box at ({bx},{by}), got {px:?}",
+        (accent.red(), accent.green(), accent.blue())
+    );
+
+    key(&app, Key::Backtab); // Dry run
+    assert_eq!(focused(&app), "Dry run (plan only, write nothing)");
+    key(&app, Key::Space);
+    assert!(app.get_remux_form().dry_run);
+    assert_eq!(dry_run.accessible_checked(), Some(true));
+    assert_eq!(*edited.borrow(), ["no_cache", "dry_run"]);
+
+    // In the locked sheet, only the 16px box dims to Theme.disabled-opacity (0.75) and shows
+    // not-allowed; the label stays at 1.0 with the default cursor (style.css `input:disabled`).
+    let mut locked = ViewState::new(None);
+    locked.busy = true;
+    apply(&app, &locked);
+    frame(&app);
+    let box_el = dry_run
+        .query_descendants()
+        .match_id("CheckBox::box")
+        .find_first()
+        .expect("CheckBox::box");
+    let label_el = dry_run
+        .query_descendants()
+        .match_type_name("Text")
+        .find_first()
+        .expect("CheckBox label");
+    assert_eq!(box_el.computed_opacity(), 0.75);
+    assert_eq!(label_el.computed_opacity(), 1.0);
+    let cursor_at = |x: f32, y: f32| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        hover_at(&app, slint::LogicalPosition::new(x, y));
+        let adapter = WindowInner::from_pub(app.window()).window_adapter();
+        let window = adapter
+            .internal(i_slint_core::InternalToken)
+            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
+            .expect("TestingWindow");
+        window.mouse_cursor()
+    };
+    let (bat, bsize) = (box_el.absolute_position(), box_el.size());
+    assert_eq!(
+        cursor_at(bat.x + bsize.width / 2.0, bat.y + bsize.height / 2.0),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "disabled CheckBox box shows not-allowed"
+    );
+    let (lat, lsize) = (label_el.absolute_position(), label_el.size());
+    assert_eq!(
+        cursor_at(lat.x + lsize.width / 2.0, lat.y + lsize.height / 2.0),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default),
+        "disabled CheckBox label keeps default cursor"
+    );
+
+    apply(&app, &ViewState::new(None));
+    app.invoke_close_sheet();
+    frame(&app);
+
+    // Appearance menu checkboxes: Tab from System -> Light -> Dark -> Reduce transparency -> Reduce motion.
+    appearance_button(&app).invoke_accessible_default_action();
+    frame(&app);
+    let theme = app.global::<Theme>();
+    let rt = only(&app, "Reduce transparency (solid panes)");
+    let rm = only(&app, "Reduce motion (fewer animations)");
+    assert_eq!(rt.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(rm.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(rt.accessible_checked(), Some(false));
+    assert_eq!(rm.accessible_checked(), Some(false));
+
+    key(&app, Key::Tab); // Light
+    key(&app, Key::Tab); // Dark
+    key(&app, Key::Tab); // Reduce transparency
+    assert_eq!(focused(&app), "Reduce transparency (solid panes)");
+    key(&app, Key::Space);
+    assert!(theme.get_reduce_transparency());
+    assert_eq!(rt.accessible_checked(), Some(true));
+
+    key(&app, Key::Tab); // Reduce motion
+    assert_eq!(focused(&app), "Reduce motion (fewer animations)");
+    key(&app, Key::Space);
+    assert!(theme.get_reduce_motion());
+    assert_eq!(rm.accessible_checked(), Some(true));
+    app.hide().unwrap();
+}

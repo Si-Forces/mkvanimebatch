@@ -98,6 +98,10 @@ export component Pressable inherits Rectangle {
     // A held Return activates it again at the key's repeat rate; a control that turns into
     // another (Run into Stop) or flips the window (the theme toggle) activates once a press.
     in property <bool> repeats: true;
+    // Return activates a button; a native checkbox toggles on Space only.
+    in property <bool> activate-on-return: true;
+    // Draw the keyboard focus ring around the whole Pressable; CheckBox draws it around its box.
+    in property <bool> draws-ring: true;
     // The modal layer it sits in (`Focus.modal`): 1 in the settings sheet, 2 in the dialog.
     in property <int> layer;
     in property <MouseCursor> cursor: MouseCursor.pointer;
@@ -168,7 +172,8 @@ export component Pressable inherits Rectangle {
             if !root.live {
                 return reject;
             }
-            if (event.text == Key.Return && (root.repeats || !event.repeat)) || (event.text == Key.Space && !event.repeat) {
+            if (root.activate-on-return && event.text == Key.Return && (root.repeats || !event.repeat))
+                || (event.text == Key.Space && !event.repeat) {
                 root.clicked();
                 return accept;
             }
@@ -193,7 +198,7 @@ export component Pressable inherits Rectangle {
         }
     }
     @children
-    if root.ring: FocusRing {
+    if root.draws-ring && root.ring: FocusRing {
         gap: root.ring-gap;
         around-width: root.width;
         around-height: root.height;
@@ -202,6 +207,79 @@ export component Pressable inherits Rectangle {
     if root.tip != "": Tooltip {
         TipCard {
             text: root.tip;
+        }
+    }
+}
+
+// A teal checkbox (.check-row): a 16px Theme.accent box beside its label, built on Pressable
+// like the queue row's checkbox so it follows Theme.accent rather than fluent's system accent and
+// respects modal layers (`layer`) without dimming under a dialog.
+export component CheckBox inherits Pressable {
+    in property <string> text;
+    in-out property <bool> checked;
+    callback toggled();
+
+    height: max(20px, row.preferred-height);
+    border-radius: 6px;
+    cursor: default;
+    activate-on-return: false;
+    draws-ring: false;
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-label: root.text;
+    clicked => {
+        root.checked = !root.checked;
+        root.toggled();
+    }
+
+    row := HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            // style.css `input:disabled { opacity: .75; cursor: not-allowed }` applies to the
+            // 16px checkbox input alone, not .check-row's label.
+            box := Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                background: root.checked ? Theme.accent : Theme.field;
+                border-width: root.checked ? 0px : 1.5px;
+                border-color: Theme.mute;
+                opacity: root.enabled ? 1 : Theme.disabled-opacity;
+                if !root.enabled && root.layer >= Focus.modal: TouchArea {
+                    mouse-cursor: not-allowed;
+                }
+                if root.checked: Path {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 10px;
+                    height: 10px;
+                    fit: preserve;
+                    commands: "M 1.5 5.2 L 4 7.7 L 8.5 2.5";
+                    stroke: Theme.accent-fg;
+                    stroke-width: 1.8px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    accessible-role: none;
+                }
+                if root.ring: FocusRing {
+                    around-width: parent.width;
+                    around-height: parent.height;
+                    radius: parent.border-radius;
+                }
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            text: root.text;
+            color: Theme.fg;
+            font-size: 13px;
+            line-height-factor: Theme.lh-body;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            accessible-role: none;
         }
     }
 }

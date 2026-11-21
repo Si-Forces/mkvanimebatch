@@ -3,10 +3,10 @@
 // bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
-import { Button, CheckBox, ScrollView, Slider } from "std-widgets.slint";
+import { Button, ScrollView, Slider } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { Focus, Pressable, Select, TextField, TipCard } from "focus.slint";
+import { CheckBox, Focus, Pressable, Select, TextField, TipCard } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -863,10 +863,11 @@ export component SettingsSheet inherits GlassPane {
                         CheckBox {
                             text: "Dry run (plan only, write nothing)";
                             checked <=> root.form.dry-run;
-                            enabled: !root.locked && !root.dialog-open;
+                            enabled: !root.locked;
+                            layer: 1;
                             toggled => { Sheet.edited("dry_run"); }
-                            changed has-focus => {
-                                if self.has-focus {
+                            changed focused => {
+                                if self.focused {
                                     Sheet.reveal(self.absolute-position.y, self.height);
                                 }
                             }
@@ -874,10 +875,11 @@ export component SettingsSheet inherits GlassPane {
                         CheckBox {
                             text: "Bypass inspection cache";
                             checked <=> root.form.no-cache;
-                            enabled: !root.locked && !root.dialog-open;
+                            enabled: !root.locked;
+                            layer: 1;
                             toggled => { Sheet.edited("no_cache"); }
-                            changed has-focus => {
-                                if self.has-focus {
+                            changed focused => {
+                                if self.focused {
                                     Sheet.reveal(self.absolute-position.y, self.height);
                                 }
                             }
