@@ -3446,7 +3446,7 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
     SlintPublisher::new(&app).show(&state);
     app.show().unwrap();
     frame(&app);
-    // The list as tall as the third release.
+    // The list as tall as the third release, with the 16px under its last row.
     let list = || {
         ElementHandle::find_by_element_id(&app, "QueuePane::list")
             .next()
@@ -3454,11 +3454,11 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
             .size()
             .height
     };
-    let height = 640.0 + 86.0 + 7.0 * 52.0 - list();
+    let height = 640.0 + 86.0 + 7.0 * 52.0 + 16.0 - list();
     app.window()
         .set_size(slint::LogicalSize::new(920.0, height));
     frame(&app);
-    assert_eq!(list(), 86.0 + 7.0 * 52.0);
+    assert_eq!(list(), 86.0 + 7.0 * 52.0 + 16.0);
 
     app.set_remux_scroll(-500.0);
     frame(&app);
@@ -4572,5 +4572,49 @@ fn text_takes_the_webviews_line_heights() {
     assert_eq!(height("Remux"), 56.0, "a mode tab");
     // Two lines of 12px × 1.6 = 38.4.
     assert_eq!(height(line), 39.0, "a log line on two lines");
+    app.hide().unwrap();
+}
+
+/// The list ends 16px under its last row (.list's bottom padding).
+#[test]
+fn the_list_ends_16px_under_its_last_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &three_releases());
+    app.show().unwrap();
+    app.set_remux_scroll(-100_000.0);
+    frame(&app);
+    let list = ElementHandle::find_by_element_id(&app, "QueuePane::list")
+        .next()
+        .unwrap();
+    let bottom = list.absolute_position().y + list.size().height;
+    // A row's checkbox is 18px under its top, in its 52px.
+    let check = only(&app, "Include c03 in the batch");
+    let row_bottom = check.absolute_position().y + check.size().height + 18.0;
+    assert_eq!(bottom - row_bottom, 16.0);
+    app.hide().unwrap();
+}
+
+/// While a batch runs, "Locked" sits at the PRESET heading's right edge (.side-group h2's
+/// space-between), 8px in from the preset rows' edge, as the heading's padding.
+#[test]
+fn the_locked_label_sits_at_the_preset_headings_right_edge() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.busy = true;
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let preset = app.get_presets().row_data(0).unwrap();
+    let row = only(&app, &preset.a11y);
+    let locked = only(&app, "Locked");
+    assert_eq!(
+        locked.absolute_position().x + locked.size().width,
+        row.absolute_position().x + row.size().width - 8.0,
+        "the label's right edge"
+    );
     app.hide().unwrap();
 }

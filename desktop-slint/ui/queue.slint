@@ -241,8 +241,9 @@ component EpRow inherits Rectangle {
         : Theme.mute;
     // Not `visible`: on a ListView row's root it wraps the row, and the ListView then cannot
     // place it. A hidden row has no height and draws nothing; a filter that hides every row makes
-    // the ListView make and lay out all of them, looking for one to fill its height with.
-    height: item.shown ? self.head-height + 52px : 0px;
+    // the ListView make and lay out all of them, looking for one to fill its height with. The last
+    // shown row (no next) takes the list's 16px bottom padding (.list: 0 12px 16px) under it.
+    height: item.shown ? self.head-height + 52px + (item.next < 0 ? 16px : 0px) : 0px;
 
     if item.shown && item.opens: GroupHead {
         x: 12px;
@@ -363,6 +364,8 @@ component EpRow inherits Rectangle {
                             font-family: "Unbounded";
                             font-size: 17px;
                             font-weight: 700;
+                            // .ep-num's -0.02em.
+                            letter-spacing: -0.34px;
                             vertical-alignment: center;
                             accessible-role: none;
                         }

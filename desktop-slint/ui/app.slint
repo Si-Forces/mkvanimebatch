@@ -650,29 +650,36 @@ export component App inherits Window {
                                     HorizontalLayout {
                                         spacing: 8px;
                                         SideHeading { text: "PRESET"; }
-                                        // .locked-label: a lock before the word.
-                                        if root.busy: HorizontalLayout {
-                                            spacing: 4px;
-                                            Path {
-                                                y: (parent.height - self.height) / 2;
-                                                width: 11px;
-                                                height: 11px;
-                                                viewbox-width: 24;
-                                                viewbox-height: 24;
-                                                stroke: Theme.warn;
-                                                stroke-width: 2.4px;
-                                                stroke-line-cap: round;
-                                                commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
-                                                accessible-role: none;
-                                            }
-                                            Text {
-                                                text: "Locked";
-                                                color: Theme.warn;
-                                                font-size: 11px;
-                                                font-weight: 500;
+                                        Rectangle { horizontal-stretch: 1; }
+                                        // .locked-label: a lock before the word, at the heading's
+                                        // right edge (justify-content: space-between), inside the
+                                        // h2's 8px padding and over its 4px margin.
+                                        if root.busy: VerticalLayout {
+                                            padding-right: 8px;
+                                            padding-bottom: 4px;
+                                            HorizontalLayout {
+                                                spacing: 4px;
+                                                Path {
+                                                    y: (parent.height - self.height) / 2;
+                                                    width: 11px;
+                                                    height: 11px;
+                                                    viewbox-width: 24;
+                                                    viewbox-height: 24;
+                                                    stroke: Theme.warn;
+                                                    stroke-width: 2.4px;
+                                                    stroke-line-cap: round;
+                                                    commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
+                                                    accessible-role: none;
+                                                }
+                                                Text {
+                                                    text: "Locked";
+                                                    color: Theme.warn;
+                                                    font-size: 11px;
+                                                    font-weight: 500;
+                                                    line-height-factor: Theme.lh-body;
+                                                }
                                             }
                                         }
-                                        Rectangle { horizontal-stretch: 1; }
                                     }
                                     for item in root.presets: PresetRow {
                                         item: item;

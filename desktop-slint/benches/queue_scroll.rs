@@ -368,7 +368,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let rows = synthetic_rows(ROWS);
     let releases = rows.chunk_by(|a, b| a.release == b.release).count();
-    let content = ROWS as f32 * ROW_H + releases as f32 * HEAD_H;
+    // The list's 16px bottom padding, under the last row.
+    let content = ROWS as f32 * ROW_H + releases as f32 * HEAD_H + 16.0;
     let mut state = ViewState::new(None);
     state.remux.title = "Bench".into();
     state.remux.empty = None;

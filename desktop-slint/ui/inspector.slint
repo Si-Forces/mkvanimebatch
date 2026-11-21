@@ -143,7 +143,8 @@ component Term inherits Text {
     color: Theme.mute;
     font-size: 12px;
     line-height-factor: Theme.lh-body;
-    vertical-alignment: center;
+    // At the top of its row, as a grid cell's text, beside a value that wraps.
+    vertical-alignment: top;
 }
 
 // A labelled field (.field-label): its label over the control.
@@ -280,6 +281,8 @@ export component InspectorPane inherits Rectangle {
                 font-size: 30px;
                 font-weight: 700;
                 line-height-factor: Theme.lh-num;
+                // .insp-num's -0.02em.
+                letter-spacing: -0.6px;
                 vertical-alignment: top;
             }
             // Takes the header's width, with crumbs or without.
