@@ -66,6 +66,8 @@ export global Theme {
 
     out property <length> window-radius: 14px;
     out property <length> pane-radius: 22px;
+    // style.css `button:disabled, input:disabled, select:disabled { opacity: .75 }`.
+    out property <float> disabled-opacity: 0.75;
     // GlassPane's shadow blur; app.slint draws one at this blur from the first frame (a pre-warm).
     out property <length> pane-shadow-blur: 40px;
 

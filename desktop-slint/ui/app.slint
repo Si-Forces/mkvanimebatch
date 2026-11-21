@@ -122,7 +122,7 @@ component OpenFolderNav inherits Pressable {
     height: 13px * 1.45 + 14px;
     border-radius: 8px;
     background: self.hovered && self.enabled ? Theme.hover : transparent;
-    opacity: self.enabled ? 1 : 0.75;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     // Its visible text, as the webview names it, apart from the queue card's "Open folder…".
     accessible-label: "+ Open folder…";
     focus-key: "nav:open-folder";
@@ -659,17 +659,25 @@ export component App inherits Window {
                                             padding-bottom: 4px;
                                             HorizontalLayout {
                                                 spacing: 4px;
-                                                Path {
+                                                Rectangle {
                                                     y: (parent.height - self.height) / 2;
                                                     width: 11px;
                                                     height: 11px;
-                                                    viewbox-width: 24;
-                                                    viewbox-height: 24;
-                                                    stroke: Theme.warn;
-                                                    stroke-width: 2.4px;
-                                                    stroke-line-cap: round;
-                                                    commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
-                                                    accessible-role: none;
+                                                    // Grow the Path by stroke-width to cancel Slint's default-fit inset.
+                                                    Path {
+                                                        x: -self.stroke-width / 2;
+                                                        y: -self.stroke-width / 2;
+                                                        width: parent.width + self.stroke-width;
+                                                        height: parent.height + self.stroke-width;
+                                                        viewbox-width: 24;
+                                                        viewbox-height: 24;
+                                                        stroke: Theme.warn;
+                                                        // The SVG's 2.4 in its 24-unit viewbox.
+                                                        stroke-width: 2.4px * 11 / 24;
+                                                        stroke-line-cap: round;
+                                                        commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
+                                                        accessible-role: none;
+                                                    }
                                                 }
                                                 Text {
                                                     text: "Locked";

@@ -243,7 +243,7 @@ export component TextField inherits Rectangle {
     border-width: 1px;
     border-color: Theme.line;
     background: Theme.field;
-    opacity: root.enabled ? 1 : 0.75;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
     forward-focus: input;
     accessible-role: text-input;
     accessible-enabled: input.enabled;
@@ -424,7 +424,7 @@ export component Select inherits Pressable {
     border-width: 1px;
     border-color: Theme.line;
     background: self.hovered && root.enabled ? Theme.hover : Theme.field;
-    opacity: root.enabled ? 1 : 0.75;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
     cursor: default;
     // A held Return would open the list again as it closes.
     repeats: false;

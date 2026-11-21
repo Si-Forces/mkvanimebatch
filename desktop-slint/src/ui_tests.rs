@@ -14,6 +14,16 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Installs Slint's software-renderer testing backend on the current test thread.
+fn init_software_renderer() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+}
+
 /// A window with its row models, as `main` builds it.
 fn new_app() -> App {
     let app = App::new().unwrap();
@@ -2405,12 +2415,7 @@ fn ink_of(family: &str, weight: i32, text: Option<&str>) -> u64 {
 /// carries far more ink than a light one, and none renders like the fallback font.
 #[test]
 fn fonts_resolve_their_weights() {
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .unwrap();
+    init_software_renderer();
     let fallback = ink("No Such Family", 400);
     for family in ["Onest", "Unbounded", "JetBrains Mono"] {
         let (light, regular, heavy) = (ink(family, 200), ink(family, 400), ink(family, 800));
@@ -2436,12 +2441,7 @@ fn cjk_names_render_through_the_system_font_fallback() {
         eprintln!("skipped: no CJK system font (fc-list :lang=ja is empty)");
         return;
     }
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .unwrap();
+    init_software_renderer();
     for name in ["葬送のフリーレン", "药屋少女的呢喃"] {
         // Private Use Area code points: no font has them.
         let missing: String = name.chars().map(|_| '\u{E000}').collect();
@@ -4463,12 +4463,7 @@ fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
 #[test]
 fn reduce_motion_stops_the_spinning_rings() {
     use std::time::Duration;
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .unwrap();
+    init_software_renderer();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
     let mut state = ViewState::new(None);
@@ -4816,6 +4811,146 @@ fn the_locked_label_sits_at_the_preset_headings_right_edge() {
         locked.absolute_position().x + locked.size().width,
         row.absolute_position().x + row.size().width - 8.0,
         "the label's right edge"
+    );
+    app.hide().unwrap();
+}
+
+/// Disabled controls render at style.css's 0.75 opacity through `Theme.disabled-opacity`.
+#[test]
+fn disabled_controls_render_at_disabled_opacity() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let opacity_of = |label: &str| {
+        only(&app, label)
+            .query_descendants()
+            .match_type_name("Text")
+            .find_first()
+            .expect("control text")
+            .computed_opacity()
+    };
+    assert_eq!(opacity_of("Select all"), 1.0);
+    assert_eq!(opacity_of("Increase workers"), 1.0);
+
+    state.busy = true;
+    state.remux.controls.selection_locked = true;
+    apply(&app, &state);
+    frame(&app);
+    assert_eq!(opacity_of("Select all"), 0.75);
+    assert_eq!(opacity_of("Increase workers"), 0.75);
+    app.hide().unwrap();
+}
+
+/// Scaled SVG Path icons grow their Path by `stroke-width` so Slint's default fit maps the
+/// 24-unit viewbox into the full icon box rather than insetting it by `stroke-width`.
+#[test]
+fn scaled_icons_span_their_full_svg_box_without_stroke_inset() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Completed,
+        label: "Done".into(),
+        tone: Tone::Ok,
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let shot = app.window().take_snapshot().unwrap();
+
+    // Row status Glyph tick: 14x14 visual box, viewbox 24x24, path x=5..19 (8.17px centerline)
+    // + 1.75px stroke = 9.92px analytic ink width; default-fit inset shrinks it to 8.90px.
+    let glyph = ElementHandle::find_by_element_type_name(&app, "Glyph")
+        .next()
+        .expect("status Glyph");
+    assert_eq!(glyph.size(), slint::LogicalSize::new(14.0, 14.0));
+    let at = glyph.absolute_position();
+    let (x0, y0) = (at.x.round() as u32, at.y.round() as u32);
+    let (mut min_x, mut max_x) = (u32::MAX, 0u32);
+    for dy in 0..14 {
+        for dx in 0..14 {
+            let px = shot.as_slice()[((y0 + dy) * shot.width() + (x0 + dx)) as usize];
+            if px.g > px.r.saturating_add(50) {
+                min_x = min_x.min(dx);
+                max_x = max_x.max(dx);
+            }
+        }
+    }
+    assert!(min_x <= max_x, "no ok-tone pixels drawn in status Glyph");
+    let tick_span = max_x - min_x + 1;
+    assert!(
+        tick_span >= 9,
+        "expected >= 9px painted tick span in 14px Glyph (no stroke inset), got {tick_span}px (x={min_x}..={max_x})"
+    );
+
+    // GearIcon: 17x17 visual box, viewbox 24x24, cog spans x=1..23 (15.58px centerline) + 1.35px
+    // stroke = 16.93px analytic ink span; default-fit inset shrinks it to 15.70px. Requiring
+    // solidly inked pixels (diff > 350, ~85% of full ink) excludes anti-aliasing fringes so the
+    // inset gear drops to 14x14 while the un-inset gear spans >= 16x16.
+    let gear = ElementHandle::find_by_element_type_name(&app, "GearIcon")
+        .next()
+        .expect("GearIcon");
+    assert_eq!(gear.size(), slint::LogicalSize::new(17.0, 17.0));
+    let g_at = gear.absolute_position();
+    let (gx0, gy0) = (g_at.x.round() as u32, g_at.y.round() as u32);
+    let bg = shot.as_slice()[((gy0 + 8) * shot.width() + (gx0 + 8)) as usize];
+    let (mut gmin_x, mut gmax_x, mut gmin_y, mut gmax_y) = (u32::MAX, 0u32, u32::MAX, 0u32);
+    for dy in 0..17 {
+        for dx in 0..17 {
+            let px = shot.as_slice()[((gy0 + dy) * shot.width() + (gx0 + dx)) as usize];
+            let diff = px.r.abs_diff(bg.r) as u32
+                + px.g.abs_diff(bg.g) as u32
+                + px.b.abs_diff(bg.b) as u32;
+            if diff > 350 {
+                gmin_x = gmin_x.min(dx);
+                gmax_x = gmax_x.max(dx);
+                gmin_y = gmin_y.min(dy);
+                gmax_y = gmax_y.max(dy);
+            }
+        }
+    }
+    let gear_span_x = gmax_x - gmin_x + 1;
+    let gear_span_y = gmax_y - gmin_y + 1;
+    assert!(
+        gear_span_x >= 16 && gear_span_y >= 16,
+        "expected >= 16x16 painted GearIcon span (no stroke inset), got {gear_span_x}x{gear_span_y}"
+    );
+
+    // Queue row checkbox tick: 10x10 Path with fit: preserve (x=1.5..8.5 centerline + 1.8px
+    // stroke = 8.80px analytic ink width; default-fit viewbox 10 shrinks it to 7.54px). Scan
+    // inside the 16x16 box (2..14) so the white background outside the 4px rounded corners is
+    // excluded.
+    let check = only(&app, "Include Show - 01.mkv in the batch");
+    assert_eq!(check.size(), slint::LogicalSize::new(16.0, 16.0));
+    let c_at = check.absolute_position();
+    let (cx0, cy0) = (c_at.x.round() as u32, c_at.y.round() as u32);
+    let (mut cmin_x, mut cmax_x) = (u32::MAX, 0u32);
+    for dy in 2..14 {
+        for dx in 2..14 {
+            let px = shot.as_slice()[((cy0 + dy) * shot.width() + (cx0 + dx)) as usize];
+            if px.r > 128 {
+                cmin_x = cmin_x.min(dx);
+                cmax_x = cmax_x.max(dx);
+            }
+        }
+    }
+    assert!(cmin_x <= cmax_x, "no white tick pixels in row checkbox");
+    let row_tick_span = cmax_x - cmin_x + 1;
+    assert!(
+        row_tick_span >= 8,
+        "expected >= 8px painted tick span in row checkbox (fit: preserve), got {row_tick_span}px (x={cmin_x}..={cmax_x})"
     );
     app.hide().unwrap();
 }

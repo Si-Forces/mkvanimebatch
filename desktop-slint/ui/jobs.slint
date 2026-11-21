@@ -61,7 +61,7 @@ export component CapButton inherits Pressable {
     height: 36px;
     border-radius: self.height / 2;
     background: self.hovered && self.enabled ? fill.darker(10%) : fill;
-    opacity: self.enabled ? 1 : 0.75;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     accessible-label: text;
     row := HorizontalLayout {
         alignment: center;
@@ -100,7 +100,7 @@ export component PillButton inherits Pressable {
     height: 36px;
     border-radius: self.height / 2;
     background: self.hovered && self.enabled ? Theme.hover : Theme.field;
-    opacity: self.enabled ? 1 : 0.75;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     border-width: 1px;
     border-color: Theme.edge;
     accessible-label: text;

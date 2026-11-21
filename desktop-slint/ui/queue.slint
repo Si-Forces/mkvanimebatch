@@ -142,15 +142,28 @@ component ScanSpinner inherits Rectangle {
     }
 }
 
-component Glyph inherits Path {
+component Glyph inherits Rectangle {
     in property <string> glyph;
+    in property <brush> stroke;
     width: 14px;
     height: 14px;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    stroke-width: 2.5px;
-    stroke-line-cap: round;
-    commands: glyph;
+    // Grow the Path by stroke-width so Slint's default fit (which insets the viewbox by
+    // stroke-width and offsets by stroke-width / 2) fits the 24-unit viewbox into the full 14px.
+    Path {
+        x: -self.stroke-width / 2;
+        y: -self.stroke-width / 2;
+        width: parent.width + self.stroke-width;
+        height: parent.height + self.stroke-width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.stroke;
+        // The SVG's 3 in its 24-unit viewbox.
+        stroke-width: 3px * 14 / 24;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: root.glyph;
+        accessible-role: none;
+    }
 }
 
 component ReorderButton inherits Pressable {
@@ -160,18 +173,21 @@ component ReorderButton inherits Pressable {
     border-radius: 5px;
     background: self.hovered && self.enabled ? Theme.sel : transparent;
     // Dimmed while locked, as the other buttons are.
-    opacity: self.enabled ? 1 : 0.5;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
 
     Path {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 10px;
-        height: 10px;
+        // Grow by stroke-width to cancel Slint's default-fit stroke inset (10px visual box).
+        width: 10px + self.stroke-width;
+        height: 10px + self.stroke-width;
         viewbox-width: 24;
         viewbox-height: 24;
         stroke: root.hovered && root.enabled ? Theme.fg : Theme.mute;
-        stroke-width: 3px;
+        // The SVG's 3 in its 24-unit viewbox.
+        stroke-width: 3px * 10 / 24;
         stroke-line-cap: round;
+        stroke-line-join: round;
         commands: root.glyph;
         accessible-role: none;
     }
@@ -358,7 +374,7 @@ component EpRow inherits Rectangle {
                         background: root.item.selected ? Theme.accent : Theme.field;
                         border-width: root.item.selected ? 0px : 1.5px;
                         border-color: Theme.mute;
-                        opacity: root.locked ? 0.5 : 1;
+                        opacity: root.locked ? Theme.disabled-opacity : 1;
                         enabled: !root.locked;
                         cursor: default;
                         focus-key: "check:" + root.key;
@@ -371,11 +387,12 @@ component EpRow inherits Rectangle {
                         if root.item.selected: Path {
                             width: 10px;
                             height: 10px;
-                            viewbox-width: 10;
-                            viewbox-height: 10;
+                            fit: preserve;
                             commands: "M 1.5 5.2 L 4 7.7 L 8.5 2.5";
                             stroke: Theme.accent-fg;
                             stroke-width: 1.8px;
+                            stroke-line-cap: round;
+                            stroke-line-join: round;
                             accessible-role: none;
                         }
                     }
@@ -551,7 +568,7 @@ export component LinkButton inherits Pressable {
     label := Text {
         text: root.text;
         color: Theme.accent;
-        opacity: root.enabled ? 1 : 0.5;
+        opacity: root.enabled ? 1 : Theme.disabled-opacity;
         font-size: 12px;
         font-weight: 600;
         vertical-alignment: center;
@@ -566,7 +583,7 @@ component AccentButton inherits Pressable {
     height: 36px;
     border-radius: self.height / 2;
     background: Theme.accent;
-    opacity: self.enabled ? 1 : 0.5;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     accessible-label: text;
     label := Text {
         text: root.text;

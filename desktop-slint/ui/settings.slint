@@ -129,15 +129,27 @@ export global Sheet {
 }
 
 // The gear icon (index.html .task-settings-btn svg): a cog around a circle.
-component GearIcon inherits Path {
+component GearIcon inherits Rectangle {
+    in property <brush> stroke;
     width: 17px;
     height: 17px;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    stroke-width: 1.9px;
-    stroke-line-cap: round;
-    stroke-line-join: round;
-    commands: "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+    // Grow the Path by stroke-width so Slint's default fit maps the 24-unit viewbox into the full
+    // 17px box without inset shrinkage.
+    Path {
+        x: -self.stroke-width / 2;
+        y: -self.stroke-width / 2;
+        width: parent.width + self.stroke-width;
+        height: parent.height + self.stroke-width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.stroke;
+        // The SVG's 1.9 in its 24-unit viewbox.
+        stroke-width: 1.9px * 17 / 24;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+        accessible-role: none;
+    }
 }
 
 // A mode tab's gear (.icon-btn.task-settings-btn): opens the mode's settings sheet, which gives the
@@ -165,7 +177,7 @@ export component PresetRow inherits Pressable {
     background: item.active ? Theme.accent-soft : self.hovered && self.enabled ? Theme.hover : transparent;
     border-width: item.active ? 1px : 0px;
     border-color: Theme.accent-ring;
-    opacity: self.enabled ? 1 : 0.75;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     accessible-label: item.a11y;
     accessible-checkable: true;
     accessible-checked: item.active;
@@ -364,7 +376,7 @@ component StepButton inherits Pressable {
     border-top-right-radius: root.up ? 8px : 0px;
     border-bottom-right-radius: root.up ? 8px : 0px;
     background: self.pressed ? Theme.sel : self.hovered && root.enabled ? Theme.hover : Theme.field;
-    opacity: root.enabled ? 1 : 0.5;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
     pointer-click: false;
     // Only the sheet has them.
     layer: 1;
