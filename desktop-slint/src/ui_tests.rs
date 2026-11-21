@@ -4250,7 +4250,10 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
     // .ep-group-head: 34px (queue.slint's `ListMetrics.head-height`), its texts on the last 16px
     // line, 6px above the bottom.
     assert_eq!(head.size().height, 34.0, "the header's height");
-    for text in head.query_descendants().match_type_name("Text").find_all() {
+    // The name and the count: a missing one fails, not a loop with nothing to check.
+    let texts = head.query_descendants().match_type_name("Text").find_all();
+    assert_eq!(texts.len(), 2, "the header's name and count");
+    for text in texts {
         let bottom = text.absolute_position().y + text.size().height;
         assert_eq!(bottom, top + 28.0, "the header's text at its bottom");
     }
@@ -4724,7 +4727,9 @@ fn the_line_height_factors_divide_by_the_embedded_fonts_natural_heights() {
         ("lh-body-mono", 1.45, MONO, theme.get_lh_body_mono()),
     ] {
         let natural = natural(font, token);
-        if (factor - css / natural).abs() >= 1e-4 {
+        // A NaN (a NaN factor, or a font whose em and metrics are all 0) fails too.
+        let off = (factor - css / natural).abs();
+        if off.is_nan() || off >= 1e-4 {
             wrong.push(format!(
                 "{token} is {factor}, not {css} / the font's {natural:.4}"
             ));
