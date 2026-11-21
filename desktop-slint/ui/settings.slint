@@ -375,7 +375,7 @@ component StepButton inherits Pressable {
     border-bottom-left-radius: root.up ? 0px : 8px;
     border-top-right-radius: root.up ? 8px : 0px;
     border-bottom-right-radius: root.up ? 8px : 0px;
-    background: self.pressed ? Theme.sel : self.hovered && root.enabled ? Theme.hover : Theme.field;
+    background: Theme.field;
     opacity: root.enabled ? 1 : Theme.disabled-opacity;
     pointer-click: false;
     // Only the sheet has them.
@@ -545,7 +545,7 @@ export component SettingsSheet inherits GlassPane {
     width: 580px;
     // .sheet.glass (GlassPane).
     border-radius: 26px;
-    clip: true;
+    clip-content: true;
     accessible-role: groupbox;
     accessible-label: root.title;
 

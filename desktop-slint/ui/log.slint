@@ -38,7 +38,7 @@ export component LogToggle inherits Pressable {
     width: row.preferred-width + 28px;
     height: 36px;
     border-radius: self.height / 2;
-    background: self.hovered ? Theme.hover : Theme.field;
+    background: Theme.field;
     border-width: 1px;
     border-color: Theme.edge;
     accessible-label: "Log";
@@ -187,7 +187,7 @@ export component LogDrawer inherits GlassPane {
     callback close();
     // The Copy or Close button has the focus: closing hands it to the Log toggle.
     out property <bool> focus-inside: copy.focused || close.focused;
-    clip: true;
+    clip-content: true;
     accessible-role: groupbox;
     accessible-label: "Log";
     // Takes the clicks meant for the panes behind.

@@ -60,9 +60,27 @@ export component CapButton inherits Pressable {
     width: row.preferred-width + 36px;
     height: 36px;
     border-radius: self.height / 2;
-    background: self.hovered && self.enabled ? fill.darker(10%) : fill;
+    background: fill;
     opacity: self.enabled ? 1 : Theme.disabled-opacity;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.cap-shadow;
     accessible-label: text;
+    // .cap's inset 0 1px 0 rgba(255,255,255,.4) top crescent (drawn with a clipped shifted border
+    // rather than inner-shadow-*, which Slint 1.19's software renderer skips).
+    Rectangle {
+        border-radius: parent.border-radius;
+        clip: true;
+        Rectangle {
+            x: -1px;
+            y: 0px;
+            width: parent.width + 2px;
+            height: parent.height + 2px;
+            border-radius: parent.border-radius + 1px;
+            border-width: 1px;
+            border-color: Theme.cap-hi;
+        }
+    }
     row := HorizontalLayout {
         alignment: center;
         spacing: 8px;
@@ -99,7 +117,7 @@ export component PillButton inherits Pressable {
     width: label.preferred-width + 30px;
     height: 36px;
     border-radius: self.height / 2;
-    background: self.hovered && self.enabled ? Theme.hover : Theme.field;
+    background: Theme.field;
     opacity: self.enabled ? 1 : Theme.disabled-opacity;
     border-width: 1px;
     border-color: Theme.edge;

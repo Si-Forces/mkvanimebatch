@@ -2298,7 +2298,11 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
         // glass-float over what a σ30 blur leaves of the queue behind a pane: the wallpaper, the
         // panes over it and their tints. Text and the small solid shapes (rings, checkboxes)
         // average out into those, and no large solid fill sits behind a pane (the bar's buttons
-        // are below the drawer); the modal dimmer is, behind the sheet and a dialog.
+        // are below the drawer); the modal dimmer is, behind the sheet and a dialog. Note: this
+        // models CSS-style exterior shadows; Slint 1.19 paints drop shadows behind translucent
+        // fills (negligible on shipped faked `float` and `glass-float-dim`, which stay >= 4.55:1,
+        // while `REAL_BLUR` light `glass-float` drops to 4.00:1 on accent-soft — tracked for P9's
+        // `REAL_BLUR` gate in PARITY.md).
         let sharp: Vec<(String, Color)> = texts
             .iter()
             .chain(&walls)
@@ -4849,7 +4853,6 @@ fn disabled_controls_render_at_disabled_opacity() {
     assert_eq!(opacity_of("Increase workers"), 0.75);
     app.hide().unwrap();
 }
-
 /// Scaled SVG Path icons grow their Path by `stroke-width` so Slint's default fit maps the
 /// 24-unit viewbox into the full icon box rather than insetting it by `stroke-width`.
 #[test]
@@ -4952,5 +4955,140 @@ fn scaled_icons_span_their_full_svg_box_without_stroke_inset() {
         row_tick_span >= 8,
         "expected >= 8px painted tick span in row checkbox (fit: preserve), got {row_tick_span}px (x={cmin_x}..={cmax_x})"
     );
+    app.hide().unwrap();
+}
+
+/// Floating pane shadow and CapButton highlight/shadow tokens follow style.css per theme, and
+/// `GlassPane` splits its fill across outer and inner layers so their composite matches `Theme.float`.
+#[test]
+fn glass_pane_shadow_tokens_and_composite_fill_follow_theme() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let theme = app.global::<Theme>();
+
+    theme.invoke_set_dark(false);
+    assert_eq!(theme.get_pane_shadow_y(), 12.0);
+    assert_eq!(theme.get_pane_shadow_blur(), 32.0);
+    assert_eq!(theme.get_pane_shadow_near_blur(), 3.0);
+    theme.invoke_set_dark(true);
+    assert_eq!(theme.get_pane_shadow_y(), 14.0);
+    assert_eq!(theme.get_pane_shadow_blur(), 40.0);
+    assert_eq!(theme.get_pane_shadow_near_blur(), 3.0);
+    assert_eq!(theme.get_cap_shadow(), Color::from_argb_u8(0x24, 0, 0, 0));
+    assert_eq!(
+        theme.get_cap_hi(),
+        Color::from_argb_u8(0x66, 0xff, 0xff, 0xff)
+    );
+
+    for dark in [false, true] {
+        theme.invoke_set_dark(dark);
+        theme.set_reduce_transparency(false);
+        theme.set_glass(false);
+        app.set_appearance_open(false);
+        frame(&app);
+        let bg_shot = app.window().take_snapshot().unwrap();
+
+        app.set_appearance_open(true);
+        frame(&app);
+        let menu = ElementHandle::find_by_element_type_name(&app, "AppearanceMenu")
+            .next()
+            .expect("AppearanceMenu");
+        let (at, size) = (menu.absolute_position(), menu.size());
+        let faked_shot = app.window().take_snapshot().unwrap();
+
+        let in_x = (at.x + size.width - 14.0).round() as u32;
+        let in_y = (at.y + size.height - 14.0).round() as u32;
+        let bg_in = bg_shot.as_slice()[(in_y * bg_shot.width() + in_x) as usize];
+        let pane_in = faked_shot.as_slice()[(in_y * faked_shot.width() + in_x) as usize];
+        let float_c = theme.get_float();
+        let a = f32::from(float_c.alpha()) / 255.0;
+        let blend = |fg: u8, bg: u8| (f32::from(fg) * a + f32::from(bg) * (1.0 - a)).round() as u8;
+        assert!(
+            pane_in.r.abs_diff(blend(float_c.red(), bg_in.r)) <= 5
+                && pane_in.g.abs_diff(blend(float_c.green(), bg_in.g)) <= 5
+                && pane_in.b.abs_diff(blend(float_c.blue(), bg_in.b)) <= 5,
+            "dark={dark}: GlassPane composite fill diverged from Theme.float: got {pane_in:?}"
+        );
+    }
+    app.hide().unwrap();
+}
+
+/// `GlassPane` renders the crisp 1px/3px near shadow below its bottom edge and compensates both
+/// shadow layers for its split fill alphas so the near shadow keeps its full strength in both
+/// light and dark themes under solid, faked-glass (`Theme.float`), and real-glass fills.
+#[test]
+fn glass_pane_near_shadow_keeps_full_strength_under_translucent_fills() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let theme = app.global::<Theme>();
+
+    for dark in [false, true] {
+        theme.invoke_set_dark(dark);
+        theme.set_reduce_transparency(false);
+        theme.set_glass(false);
+        app.set_appearance_open(false);
+        frame(&app);
+        let bg_shot = app.window().take_snapshot().unwrap();
+
+        app.set_appearance_open(true);
+        frame(&app);
+        let menu = ElementHandle::find_by_element_type_name(&app, "AppearanceMenu")
+            .next()
+            .expect("AppearanceMenu");
+        let (at, size) = (menu.absolute_position(), menu.size());
+        let px_x = (at.x + size.width / 2.0).round() as u32;
+        let near_y = (at.y + size.height + 1.0).round() as u32;
+        let far_y = (at.y + size.height + 6.0).round() as u32;
+        let luma = |shot: &slint::SharedPixelBuffer<slint::Rgba8Pixel>, y: u32| {
+            let p = shot.as_slice()[(y * shot.width() + px_x) as usize];
+            f32::from(p.r) * 0.2126 + f32::from(p.g) * 0.7152 + f32::from(p.b) * 0.0722
+        };
+        let darkening = |bg: &slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+                         fg: &slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+                         y: u32| {
+            let b = luma(bg, y);
+            (b - luma(fg, y)) / b.max(1.0)
+        };
+
+        let faked_shot = app.window().take_snapshot().unwrap();
+        let faked_near = darkening(&bg_shot, &faked_shot, near_y);
+        let faked_step = faked_near - darkening(&bg_shot, &faked_shot, far_y);
+
+        theme.set_glass(true);
+        frame(&app);
+        let glass_shot = app.window().take_snapshot().unwrap();
+        let glass_near = darkening(&bg_shot, &glass_shot, near_y);
+        let glass_step = glass_near - darkening(&bg_shot, &glass_shot, far_y);
+
+        theme.set_glass(false);
+        theme.set_reduce_transparency(true);
+        app.set_appearance_open(false);
+        frame(&app);
+        let solid_bg = app.window().take_snapshot().unwrap();
+        app.set_appearance_open(true);
+        frame(&app);
+        let solid_shot = app.window().take_snapshot().unwrap();
+        let solid_near = darkening(&solid_bg, &solid_shot, near_y);
+        let solid_step = solid_near - darkening(&solid_bg, &solid_shot, far_y);
+
+        // The 1px/3px near shadow decays between y = bottom + 1 and y = bottom + 6 while the
+        // 32px/40px far shadow is nearly flat over those 5px, so removing or under-weighting the
+        // near shadow collapses this step in both themes.
+        let min_step = if dark { 0.10 } else { 0.025 };
+        assert!(
+            solid_step >= min_step && faked_step >= min_step && glass_step >= min_step,
+            "dark={dark}: expected >= {min_step:.3} near-shadow step (bottom+1 vs bottom+6), got solid={solid_step:.4}, faked={faked_step:.4}, glass={glass_step:.4}"
+        );
+        assert!(
+            (faked_near - solid_near).abs() < 0.008 && (glass_near - solid_near).abs() < 0.008,
+            "dark={dark}: near shadow weakened under translucent fill: solid={solid_near:.4}, faked={faked_near:.4}, glass={glass_near:.4}"
+        );
+    }
     app.hide().unwrap();
 }
