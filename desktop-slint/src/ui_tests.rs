@@ -3289,11 +3289,11 @@ fn assert_row_in_view(app: &App, id: &str) {
         list.absolute_position().y,
         list.absolute_position().y + list.size().height,
     );
-    // The pinned header is a GroupHead, 30px tall.
+    // The pinned header is a GroupHead, 34px tall.
     let clear = if app.get_remux_pinned().is_empty() {
         top
     } else {
-        top + 30.0
+        top + 34.0
     };
     let pick = only(app, id);
     let (y, height) = (pick.absolute_position().y, pick.size().height);
@@ -3428,7 +3428,7 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
-    // 20 rows, 20 more, then 8 in a third release: 82px for its first row (with its header),
+    // 20 rows, 20 more, then 8 in a third release: 86px for its first row (with its header),
     // 52px for each other.
     let mut state = three_releases();
     let rows: Vec<Row> = (0..48)
@@ -3446,7 +3446,7 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
     SlintPublisher::new(&app).show(&state);
     app.show().unwrap();
     frame(&app);
-    // The list as tall as the third release.
+    // The list as tall as the third release, with the 16px under its last row.
     let list = || {
         ElementHandle::find_by_element_id(&app, "QueuePane::list")
             .next()
@@ -3454,11 +3454,12 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
             .size()
             .height
     };
-    let height = 640.0 + 82.0 + 7.0 * 52.0 - list();
+    // 86: a release head (queue.slint's `ListMetrics.head-height`, 34px) over a 52px row.
+    let height = 640.0 + 86.0 + 7.0 * 52.0 + 16.0 - list();
     app.window()
         .set_size(slint::LogicalSize::new(920.0, height));
     frame(&app);
-    assert_eq!(list(), 82.0 + 7.0 * 52.0);
+    assert_eq!(list(), 86.0 + 7.0 * 52.0 + 16.0);
 
     app.set_remux_scroll(-500.0);
     frame(&app);
@@ -4234,7 +4235,8 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         let text = app.get_remux_pinned();
         (!text.is_empty()).then(|| format!("{text} {}", app.get_remux_pinned_count()))
     };
-    let top = only(&app, "Include a00 in the batch").absolute_position().y - 30.0 - 18.0;
+    // The checkbox sits 18px into its row, under a 34px head (`ListMetrics.head-height`).
+    let top = only(&app, "Include a00 in the batch").absolute_position().y - 34.0 - 18.0;
 
     assert_eq!(pinned(&app), None, "the first header shows in place");
     app.set_remux_scroll(-500.0);
@@ -4245,6 +4247,16 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         .find(|head| head.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::None))
         .unwrap();
     assert_eq!(head.absolute_position().y, top, "at the list's top");
+    // .ep-group-head: 34px (queue.slint's `ListMetrics.head-height`), its texts on the last 16px
+    // line, 6px above the bottom.
+    assert_eq!(head.size().height, 34.0, "the header's height");
+    // The name and the count: a missing one fails, not a loop with nothing to check.
+    let texts = head.query_descendants().match_type_name("Text").find_all();
+    assert_eq!(texts.len(), 2, "the header's name and count");
+    for text in texts {
+        let bottom = text.absolute_position().y + text.size().height;
+        assert_eq!(bottom, top + 28.0, "the header's text at its bottom");
+    }
 
     // A filter that hides the pinned release's rows unpins its header, and the count with it.
     publisher.show_filter(Mode::Remux, QueueFilter::Done);
@@ -4445,8 +4457,9 @@ fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
     app.hide().unwrap();
 }
 
-/// Reduce motion stops the spinning rings: a processing row's ring, drawn, turns with the
-/// animation tick, and stands still under Reduce motion, the window drawing no frame for it.
+/// Reduce motion stops the spinning rings: a processing row's ring and the scanning card's
+/// spinner, drawn, turn with the animation tick, and stand still under Reduce motion, the window
+/// drawing no frame for them.
 #[test]
 fn reduce_motion_stops_the_spinning_rings() {
     use std::time::Duration;
@@ -4478,6 +4491,18 @@ fn reduce_motion_stops_the_spinning_rings() {
     assert!(animated(), "the ring spins");
     app.global::<Theme>().set_reduce_motion(true);
     assert!(!animated(), "the ring stands still");
+
+    // The scanning card's spinner, with no row left to spin.
+    app.global::<Theme>().set_reduce_motion(false);
+    let mut scanning = ViewState::new(None);
+    scanning.remux.empty = None;
+    scanning.remux.scan = ScanView::Scanning {
+        directory: "/media/Show".into(),
+    };
+    apply(&app, &scanning);
+    assert!(animated(), "the spinner spins");
+    app.global::<Theme>().set_reduce_motion(true);
+    assert!(!animated(), "the spinner stands still");
     app.hide().unwrap();
 }
 
@@ -4528,5 +4553,269 @@ fn the_appearance_button_reports_its_menu_expanded() {
     assert!(app.get_appearance_open());
     assert_eq!(button.accessible_expanded(), Some(true));
     assert_eq!(focused(&app), "Appearance");
+    app.hide().unwrap();
+}
+
+/// Text takes style.css's line heights (body 1.45, .nav-text 1.2, .log-body 1.6, .brand-name
+/// 1.15, .crumbs 1.5, .insp-num 1), each rounded up to a whole pixel, and the chips their box
+/// around it: the list header's title, chips and hint, a mode tab with a wrapped subtitle, a log
+/// line that wraps, the brand's subtitle, a crumb, and the Inspector's number and error.
+#[test]
+fn text_takes_the_webviews_line_heights() {
+    use mkv_anime_batch_slint_ui::{LogRow, LogTone};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    let line = "[12:00:00] a log line long enough to wrap onto a second line in the drawer";
+    app.set_remux_log(
+        Rc::new(slint::VecModel::from(vec![LogRow {
+            text: line.into(),
+            tone: LogTone::Plain,
+        }]))
+        .into(),
+    );
+    app.set_log_open(true);
+    app.show().unwrap();
+    frame(&app);
+    let height = |label: &str| only(&app, label).size().height;
+    // 18px × 1.45 = 26.1, 12px × 1.45 = 17.4.
+    assert_eq!(height("No folder open"), 27.0, "the title");
+    assert_eq!(
+        height("Tick episodes to include them. Click a row to inspect it."),
+        18.0,
+        "the hint"
+    );
+    // .chip: the 17.4px line in 4px of padding and a 1px border.
+    assert!((height("All 0") - 27.4).abs() < 0.01, "a chip");
+    // .nav-text: 13px and two 11px lines × 1.2 (16 + 27), in 7px of padding: .nav's 56px.
+    assert_eq!(height("Remux"), 56.0, "a mode tab");
+    // Two lines of 12px × 1.6 = 38.4.
+    assert_eq!(height(line), 39.0, "a log line on two lines");
+    // .brand-name's 1.15: the 11px subtitle 12.65.
+    // Unlabelled (`accessible-role: none`): found by its id.
+    let subtitle = ElementHandle::find_by_element_id(&app, "TitleBar::subtitle")
+        .next()
+        .unwrap();
+    assert_eq!(subtitle.size().height, 13.0, "the brand's subtitle");
+
+    // A path in the list header and an Inspector with an error.
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.crumbs = vec!["Anime".into(), "Show".into()];
+    let mut view = sample_view();
+    view.error = Some("Inspection failed".into());
+    // No crumbs, so the number sets the header's height, not the column beside it.
+    view.crumbs = Vec::new();
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+    frame(&app);
+    // .crumbs's 1.5: 12px × 1.5 = 18.
+    assert_eq!(height("Show"), 18.0, "a crumb");
+    // .insp-num's 1: 30px.
+    assert_eq!(height("03"), 30.0, "the Inspector's number");
+    // body's 1.45 in mono: 12px × 1.45 = 17.4.
+    let error: Vec<_> = ElementHandle::find_by_element_type_name(&app, "TextInput")
+        .filter(|element| element.accessible_value().as_deref() == Some("Inspection failed"))
+        .collect();
+    assert_eq!(error.len(), 1, "one error field");
+    assert_eq!(
+        error[0].size().height,
+        18.0,
+        "the Inspector's error on one line"
+    );
+    app.hide().unwrap();
+}
+
+/// The list ends 16px under its last shown row (.list's bottom padding), under a filter that
+/// hides the last row too.
+#[test]
+fn the_list_ends_16px_under_its_last_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = three_releases();
+    publisher.show(&state);
+    app.show().unwrap();
+    let under = |id: &str| {
+        // Scrolled to the end as the wheel does, a step at a time: a scroll set far past the end
+        // of a list whose last row is hidden (0px) leaves the testing backend's ListView with no
+        // row made.
+        frame(&app);
+        for _ in 0..100 {
+            let scroll = app.get_remux_scroll();
+            app.set_remux_scroll(scroll - 200.0);
+            frame(&app);
+            if app.get_remux_scroll() == scroll {
+                break;
+            }
+        }
+        let list = ElementHandle::find_by_element_id(&app, "QueuePane::list")
+            .next()
+            .unwrap();
+        // A row's checkbox is 18px under its top, in its 52px.
+        let check = only(&app, &format!("Include {id} in the batch"));
+        let row_bottom = check.absolute_position().y + check.size().height + 18.0;
+        list.absolute_position().y + list.size().height - row_bottom
+    };
+    assert_eq!(under("c03"), 16.0, "the last row");
+
+    // The last row done, under To do: the one before it is the last shown.
+    state.seq = 1;
+    let mut rows = state.remux.rows.to_vec();
+    rows.last_mut().unwrap().bucket = Some(Bucket::Done);
+    state.remux.rows = Arc::new(rows);
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    assert_eq!(under("c02"), 16.0, "the last row To do shows");
+    app.hide().unwrap();
+}
+
+/// Theme's `lh-*` factors divide each CSS line height by its font's natural one, (ascent -
+/// descent + line gap) / em, which Slint (skrifa) takes from OS/2's typo metrics when the font sets
+/// USE_TYPO_METRICS, else from hhea. The compiled factors are checked against the CSS heights
+/// and the embedded fonts, so a replaced font or a changed factor fails here, before it shifts
+/// every line height.
+#[test]
+fn the_line_height_factors_divide_by_the_embedded_fonts_natural_heights() {
+    /// The natural line height in ems of `font`, which `token` uses.
+    fn natural(font: &[u8], token: &str) -> f32 {
+        let pair = |at: usize| -> [u8; 2] {
+            font.get(at..at + 2)
+                .and_then(|bytes| bytes.try_into().ok())
+                .unwrap_or_else(|| panic!("{token}'s font ends before byte {at}"))
+        };
+        let u16_at = |at: usize| u16::from_be_bytes(pair(at));
+        let i16_at = |at: usize| f32::from(i16::from_be_bytes(pair(at)));
+        // The table directory: 16-byte records from byte 12, each a tag, a checksum, an offset.
+        let table = |tag: &[u8; 4]| {
+            let record = (0..usize::from(u16_at(4)))
+                .map(|i| 12 + 16 * i)
+                .find(|&record| font.get(record..record + 4) == Some(&tag[..]))
+                .unwrap_or_else(|| {
+                    panic!("{token}'s font has no {}", String::from_utf8_lossy(tag))
+                });
+            (usize::from(u16_at(record + 8)) << 16) | usize::from(u16_at(record + 10))
+        };
+        let em = f32::from(u16_at(table(b"head") + 18));
+        let os2 = table(b"OS/2");
+        // fsSelection bit 7; sTypoAscender, sTypoDescender, sTypoLineGap; else hhea's three.
+        let metrics = if u16_at(os2 + 62) & 0x80 != 0 {
+            os2 + 68
+        } else {
+            table(b"hhea") + 4
+        };
+        (i16_at(metrics) - i16_at(metrics + 2) + i16_at(metrics + 4)) / em
+    }
+    const ONEST: &[u8] = include_bytes!("../ui/fonts/Onest-wght.ttf");
+    const UNBOUNDED: &[u8] = include_bytes!("../ui/fonts/Unbounded-wght.ttf");
+    const MONO: &[u8] = include_bytes!("../ui/fonts/JetBrainsMono-wght.ttf");
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    let theme = app.global::<Theme>();
+    // Each token, its CSS line height, its font and its compiled factor; every wrong one is named.
+    let mut wrong = Vec::new();
+    for (token, css, font, factor) in [
+        ("lh-body", 1.45, ONEST, theme.get_lh_body()),
+        ("lh-nav", 1.2, ONEST, theme.get_lh_nav()),
+        ("lh-brand", 1.15, ONEST, theme.get_lh_brand()),
+        ("lh-crumbs", 1.5, ONEST, theme.get_lh_crumbs()),
+        ("lh-num", 1.0, UNBOUNDED, theme.get_lh_num()),
+        ("lh-log", 1.6, MONO, theme.get_lh_log()),
+        ("lh-body-mono", 1.45, MONO, theme.get_lh_body_mono()),
+    ] {
+        let natural = natural(font, token);
+        // A NaN (a NaN factor, or a font whose em and metrics are all 0) fails too.
+        let off = (factor - css / natural).abs();
+        if off.is_nan() || off >= 1e-4 {
+            wrong.push(format!(
+                "{token} is {factor}, not {css} / the font's {natural:.4}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The scanning card's spinner is .scan-spinner's 26px ring, not a row's 20px one.
+#[test]
+fn the_scanning_card_spins_a_26px_ring() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.empty = None;
+    state.remux.scan = ScanView::Scanning {
+        directory: "/media/Show".into(),
+    };
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let spinners: Vec<_> = ElementHandle::find_by_element_type_name(&app, "ScanSpinner").collect();
+    assert_eq!(spinners.len(), 1, "one spinner");
+    assert_eq!(spinners[0].size(), slint::LogicalSize::new(26.0, 26.0));
+    app.hide().unwrap();
+}
+
+/// The traffic lights and the steppers show the pointer: the webview draws both as `<button>`s,
+/// which style.css's `button { cursor: pointer }` covers.
+#[test]
+fn the_traffic_lights_and_the_steppers_show_the_pointer() {
+    use i_slint_backend_testing::testing_backend::TestingWindow;
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    use i_slint_core::window::WindowInner;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let pointer_over = |label: &str| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let element = only(&app, label);
+        let (at, size) = (element.absolute_position(), element.size());
+        hover_at(
+            &app,
+            slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0),
+        );
+        let adapter = WindowInner::from_pub(app.window()).window_adapter();
+        let window = adapter
+            .internal(i_slint_core::InternalToken)
+            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
+            .unwrap();
+        matches!(
+            window.mouse_cursor(),
+            MouseCursorInner::BuiltIn(BuiltInMouseCursor::Pointer)
+        )
+    };
+    assert!(pointer_over("Close window"), "a traffic light");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    assert!(pointer_over("Increase workers"), "a stepper");
+    app.hide().unwrap();
+}
+
+/// While a batch runs, "Locked" sits at the PRESET heading's right edge (.side-group h2's
+/// space-between), 8px in from the preset rows' edge, as the heading's padding.
+#[test]
+fn the_locked_label_sits_at_the_preset_headings_right_edge() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.busy = true;
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let preset = app.get_presets().row_data(0).unwrap();
+    let row = only(&app, &preset.a11y);
+    let locked = only(&app, "Locked");
+    assert_eq!(
+        locked.absolute_position().x + locked.size().width,
+        row.absolute_position().x + row.size().width - 8.0,
+        "the label's right edge"
+    );
     app.hide().unwrap();
 }

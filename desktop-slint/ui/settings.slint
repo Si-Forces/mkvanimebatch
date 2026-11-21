@@ -159,7 +159,8 @@ export component GearButton inherits Pressable {
 // batch runs (.lock-while-job).
 export component PresetRow inherits Pressable {
     in property <PresetItem> item;
-    height: 44px;
+    // .nav: the name over the encode (.nav-text, 13px and 11px lines × 1.2) in 7px of padding.
+    height: (13px + 11px) * 1.2 + 14px;
     border-radius: 8px;
     background: item.active ? Theme.accent-soft : self.hovered && self.enabled ? Theme.hover : transparent;
     border-width: item.active ? 1px : 0px;
@@ -188,6 +189,7 @@ export component PresetRow inherits Pressable {
                 text: root.item.name;
                 color: Theme.fg;
                 font-weight: root.item.active ? 600 : 500;
+                line-height-factor: Theme.lh-nav;
                 overflow: elide;
                 accessible-role: none;
             }
@@ -195,6 +197,7 @@ export component PresetRow inherits Pressable {
                 text: root.item.sub;
                 color: Theme.mute;
                 font-size: 11px;
+                line-height-factor: Theme.lh-nav;
                 overflow: elide;
                 accessible-role: none;
             }
@@ -208,6 +211,7 @@ export component SectionHead inherits Text {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.77px;
+    line-height-factor: Theme.lh-body;
 }
 
 // A labelled field (.field-label): the label, and a "required" tag, over its control. `tip` is
@@ -231,6 +235,7 @@ component Field inherits Rectangle {
                 color: Theme.mute;
                 font-size: 12px;
                 font-weight: 500;
+                line-height-factor: Theme.lh-body;
                 accessible-role: none;
             }
             if root.required: Text {
@@ -360,7 +365,6 @@ component StepButton inherits Pressable {
     border-bottom-right-radius: root.up ? 8px : 0px;
     background: self.pressed ? Theme.sel : self.hovered && root.enabled ? Theme.hover : Theme.field;
     opacity: root.enabled ? 1 : 0.5;
-    cursor: default;
     pointer-click: false;
     // Only the sheet has them.
     layer: 1;
@@ -579,12 +583,12 @@ export component SettingsSheet inherits GlassPane {
                 VerticalLayout {
                     horizontal-stretch: 1;
                     alignment: center;
-                    spacing: 2px;
                     Text {
                         text: root.title;
                         color: Theme.fg;
                         font-size: 16px;
                         font-weight: 700;
+                        line-height-factor: Theme.lh-body;
                         // The sheet carries it as its label.
                         accessible-role: none;
                     }
@@ -592,6 +596,7 @@ export component SettingsSheet inherits GlassPane {
                         text: "Applies to every episode in the next batch.";
                         color: Theme.mute;
                         font-size: 12px;
+                        line-height-factor: Theme.lh-body;
                         wrap: word-wrap;
                     }
                 }
@@ -629,6 +634,7 @@ export component SettingsSheet inherits GlassPane {
                                 text: "Locked while a batch runs. Changes apply to the next batch.";
                                 color: Theme.warn;
                                 font-size: 12px;
+                                line-height-factor: Theme.lh-body;
                                 wrap: word-wrap;
                             }
                         }
@@ -639,6 +645,7 @@ export component SettingsSheet inherits GlassPane {
                             text: "Extracts the best subtitle track, deduplicated fonts, chapters and cover art.";
                             color: Theme.mute;
                             font-size: 12px;
+                            line-height-factor: Theme.lh-body;
                             wrap: word-wrap;
                         }
                     }

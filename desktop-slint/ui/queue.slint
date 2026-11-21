@@ -72,6 +72,8 @@ export struct QueueHead {
 // window draws no frame for it otherwise.
 export global Spin {
     out property <angle> turn: Theme.reduce-motion ? 0deg : mod(animation-tick(), 1100ms) / 1100ms * 360deg;
+    // .scan-spinner's: a turn a second.
+    out property <angle> scan-turn: Theme.reduce-motion ? 0deg : mod(animation-tick(), 1000ms) / 1000ms * 360deg;
 }
 
 // The status ring (.ep-ring): a track and the progress arc, or a spinning quarter.
@@ -112,6 +114,34 @@ component Ring inherits Rectangle {
     }
 }
 
+// The scanning card's spinner (.scan-spinner): a 26px ring 3px wide, its top quarter (the
+// border-top between the corners' diagonals) in the info tone. Its paths keep their coordinates
+// (`fit: preserve`, which takes no viewbox), which already keep the stroke inside the 26px. The
+// default fit scales each path to its own bounds, so the quarter arc would drift off the ring.
+component ScanSpinner inherits Rectangle {
+    width: 26px;
+    height: 26px;
+
+    Path {
+        width: 26px;
+        height: 26px;
+        fit: preserve;
+        stroke: Theme.line;
+        stroke-width: 3px;
+        commands: "M 13 1.5 A 11.5 11.5 0 1 1 12.99 1.5";
+    }
+    Path {
+        width: 26px;
+        height: 26px;
+        fit: preserve;
+        stroke: Theme.info;
+        stroke-width: 3px;
+        transform-rotation: Spin.scan-turn;
+        // From -45deg to 45deg on the 11.5 radius: 13 ∓ 11.5 × sin 45deg.
+        commands: "M 4.868 4.868 A 11.5 11.5 0 0 1 21.132 4.868";
+    }
+}
+
 component Glyph inherits Path {
     in property <string> glyph;
     width: 14px;
@@ -147,6 +177,12 @@ component ReorderButton inherits Pressable {
     }
 }
 
+// .ep-group-head's height: a release's header over its first row, and the copy pinned at the
+// list's top. The tests and the queue bench repeat it as 34.0.
+global ListMetrics {
+    out property <length> head-height: 34px;
+}
+
 // A release's header (.ep-group-head): its name and how many rows of its run the filter shows.
 component GroupHead inherits Rectangle {
     in property <string> text;
@@ -154,7 +190,8 @@ component GroupHead inherits Rectangle {
     // The copy pinned at the list's top: a click on it reaches no row. Only the row's own header
     // is read out (its instance's label).
     in property <bool> pinned;
-    height: 30px;
+    // .ep-group-head: 12px of padding above the 11px line (× 1.45), 6px below.
+    height: ListMetrics.head-height;
     // Square at the top, as style.css's `border-radius: 0 0 10px 10px`.
     border-top-left-radius: 0px;
     border-top-right-radius: 0px;
@@ -163,6 +200,8 @@ component GroupHead inherits Rectangle {
     if root.pinned: TouchArea { }
     background: Theme.head;
     HorizontalLayout {
+        padding-top: 12px;
+        padding-bottom: 6px;
         padding-left: 8px;
         padding-right: 8px;
         Text {
@@ -171,6 +210,7 @@ component GroupHead inherits Rectangle {
             font-size: 11px;
             font-weight: 600;
             letter-spacing: 0.66px;
+            line-height-factor: Theme.lh-body;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -180,6 +220,7 @@ component GroupHead inherits Rectangle {
             color: Theme.mute;
             font-size: 11px;
             font-weight: 600;
+            line-height-factor: Theme.lh-body;
             horizontal-alignment: right;
             vertical-alignment: center;
             accessible-role: none;
@@ -219,7 +260,7 @@ component EpRow inherits Rectangle {
     callback tab-to(row: int, forward: bool);
     // A control of the row took the focus from the keyboard: the row scrolls into view, below
     // the release header pinned at the list's top, if any (`under-pin`: the row's body starts
-    // within the 30px that header covers).
+    // within the 34px that header covers).
     callback scroll-into-view(under-pin: bool);
 
     // The row spans the list's top edge: its run's header pins there (`position: sticky`), unless
@@ -229,15 +270,16 @@ component EpRow inherits Rectangle {
         && !(item.opens && self.y + root.scroll >= 0)
         ? { text: item.head, count: item.head-count, y: self.y, row: root.index } : { text: "", count: 0, y: 0, row: -1 };
 
-    property <length> head-height: item.opens ? 30px : 0px;
+    property <length> head-height: item.opens ? ListMetrics.head-height : 0px;
     property <color> tone-color: item.tone == RowTone.info ? Theme.info
         : item.tone == RowTone.ok ? Theme.ok
         : item.tone == RowTone.err ? Theme.err
         : Theme.mute;
     // Not `visible`: on a ListView row's root it wraps the row, and the ListView then cannot
     // place it. A hidden row has no height and draws nothing; a filter that hides every row makes
-    // the ListView make and lay out all of them, looking for one to fill its height with.
-    height: item.shown ? self.head-height + 52px : 0px;
+    // the ListView make and lay out all of them, looking for one to fill its height with. The last
+    // shown row (no next) takes the list's 16px bottom padding (.list: 0 12px 16px) under it.
+    height: item.shown ? self.head-height + 52px + (item.next < 0 ? 16px : 0px) : 0px;
 
     if item.shown && item.opens: GroupHead {
         x: 12px;
@@ -290,7 +332,7 @@ component EpRow inherits Rectangle {
                 : 0;
             changed focused-control => {
                 if self.focused-control != 0 && Focus.keyboard {
-                    root.scroll-into-view(root.y + root.head-height + root.scroll < 30px);
+                    root.scroll-into-view(root.y + root.head-height + root.scroll < ListMetrics.head-height);
                 }
             }
 
@@ -358,6 +400,8 @@ component EpRow inherits Rectangle {
                             font-family: "Unbounded";
                             font-size: 17px;
                             font-weight: 700;
+                            // .ep-num's -0.02em.
+                            letter-spacing: -0.34px;
                             vertical-alignment: center;
                             accessible-role: none;
                         }
@@ -367,6 +411,7 @@ component EpRow inherits Rectangle {
                                 text: root.item.name;
                                 color: Theme.fg;
                                 font-weight: 600;
+                                line-height-factor: Theme.lh-body;
                                 overflow: elide;
                                 accessible-role: none;
                             }
@@ -374,6 +419,7 @@ component EpRow inherits Rectangle {
                                 text: root.item.meta;
                                 color: root.item.meta-error ? Theme.err : Theme.path;
                                 font-size: 12px;
+                                line-height-factor: Theme.lh-body;
                                 overflow: elide;
                                 accessible-role: none;
                             }
@@ -425,10 +471,13 @@ component EpRow inherits Rectangle {
                 // while a filter shows, gone from the accessibility tree too, their width kept
                 // (style.css's `visibility: hidden`), and disabled, so no programmatic focus
                 // (`Focus.restore`, `follow-key`) reaches them: a hidden scope still takes it.
+                // They fade in and out over 150ms, as .ep-reorder's transition (which style.css's
+                // prefers-reduced-motion rule keeps).
                 Rectangle {
                     width: 22px;
                     visible: !root.filtered;
                     opacity: body.has-hover || body.focus-within ? 1 : 0;
+                    animate opacity { duration: 150ms; easing: ease; }
                     VerticalLayout {
                         alignment: center;
                         up := ReorderButton {
@@ -457,7 +506,8 @@ component Chip inherits Pressable {
     in property <string> label;
     in property <int> count;
     in property <bool> on;
-    height: 24px;
+    // .chip: a 12px line (× 1.45) in 4px of padding and a 1px border.
+    height: 12px * 1.45 + 10px;
     width: content.preferred-width + 24px;
     border-radius: self.height / 2;
     background: on ? Theme.fg : Theme.sel;
@@ -494,7 +544,8 @@ component Chip inherits Pressable {
 export component LinkButton inherits Pressable {
     in property <string> text;
     width: label.preferred-width + 8px;
-    height: 24px;
+    // .link-btn: a 12px line (× 1.45) in 4px of padding.
+    height: 12px * 1.45 + 8px;
     border-radius: 6px;
     accessible-label: text;
     label := Text {
@@ -570,7 +621,7 @@ export component QueuePane inherits Rectangle {
             root.reveal-pending = row;
             return;
         }
-        // Past the end of every row: no row is taller than a release head over a row.
+        // Past the end of every row: none is taller than `tallest-row`.
         root.list-scroll = -root.rows.length * root.tallest-row;
         list.ensure-row-visible(row, ScrollBehavior.instant);
         if root.list-scroll == scroll {
@@ -580,7 +631,7 @@ export component QueuePane inherits Rectangle {
     }
 
     // Scrolls shown row `row` fully into view. A row above the list's top lands at its top edge,
-    // under the release header pinned there (30px) when the row has one (a queue of more than one
+    // under the release header pinned there (34px) when the row has one (a queue of more than one
     // release), so going up (`up`) the shown row before it is scrolled in first: the row lands
     // below that one, which is taller than the header. With no header it stays at the edge. The
     // two calls run before a layout, so for a row not made yet the landing is an estimate, which
@@ -620,8 +671,8 @@ export component QueuePane inherits Rectangle {
 
     // The row a reveal waits to scroll to, or -1.
     property <int> reveal-pending: -1;
-    // EpRow at its tallest: a release head over the row.
-    property <length> tallest-row: 30px + 52px;
+    // EpRow at its tallest: a release head over the list's last row, with the 16px under it.
+    property <length> tallest-row: ListMetrics.head-height + 52px + 16px;
     // The row marked as inspected: the one picked, until its Inspect is answered.
     out property <string> marked: pending-inspect != "" ? pending-inspect : head.inspected;
 
@@ -682,6 +733,7 @@ export component QueuePane inherits Rectangle {
                     color: Theme.fg;
                     font-size: 18px;
                     font-weight: 700;
+                    line-height-factor: Theme.lh-body;
                     // At a space, else anywhere, as .release-title's overflow-wrap: anywhere: a
                     // folder name may have no space to break at. `text-wrap: balance` has no
                     // counterpart.
@@ -702,12 +754,14 @@ export component QueuePane inherits Rectangle {
                         text: root.head.crumbs-lead;
                         color: Theme.path;
                         font-size: 12px;
+                        line-height-factor: Theme.lh-crumbs;
                         overflow: elide;
                     }
                     Text {
                         text: root.head.crumbs-end;
                         color: Theme.fg;
                         font-size: 12px;
+                        line-height-factor: Theme.lh-crumbs;
                         font-weight: 600;
                         overflow: elide;
                     }
@@ -769,6 +823,7 @@ export component QueuePane inherits Rectangle {
                 text: root.busy ? "Selection is locked while the batch runs." : "Tick episodes to include them. Click a row to inspect it.";
                 color: Theme.mute;
                 font-size: 12px;
+                line-height-factor: Theme.lh-body;
                 // Wraps in a narrow list, as the webview's hint does.
                 wrap: word-wrap;
             }
@@ -867,7 +922,7 @@ export component QueuePane inherits Rectangle {
                     alignment: start;
                     if root.head.card-spinner: HorizontalLayout {
                         alignment: center;
-                        Ring { spinning: true; }
+                        ScanSpinner { }
                     }
                     if !root.head.card-spinner: HorizontalLayout {
                         alignment: center;
@@ -889,12 +944,14 @@ export component QueuePane inherits Rectangle {
                         color: Theme.fg;
                         font-size: 15px;
                         font-weight: 700;
+                        line-height-factor: Theme.lh-body;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
                     Text {
                         text: root.head.card-text;
                         color: Theme.mute;
+                        line-height-factor: Theme.lh-body;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
@@ -921,6 +978,7 @@ export component QueuePane inherits Rectangle {
             Text {
                 text: "No episodes match this filter.";
                 color: Theme.mute;
+                line-height-factor: Theme.lh-body;
                 wrap: word-wrap;
             }
         }

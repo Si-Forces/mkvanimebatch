@@ -70,7 +70,8 @@ export struct Inspector {
 // A Library entry (.nav.lib-root / .nav.lib-release), its `title` the hover tooltip.
 export component LibraryEntry inherits Pressable {
     in property <LibraryItem> item;
-    height: 32px;
+    // .nav: a 13px line (× 1.45) in 7px of padding, 6px for a release (.lib-release).
+    height: 13px * 1.45 + (item.root ? 14px : 12px);
     border-radius: 8px;
     background: self.hovered ? Theme.hover : item.root ? Theme.sel : transparent;
     accessible-label: item.a11y;
@@ -126,6 +127,7 @@ component Crumbs inherits Rectangle {
             text: part;
             color: self.last && !root.plain ? Theme.fg : Theme.path;
             font-size: 12px;
+            line-height-factor: Theme.lh-crumbs;
             font-weight: self.last && !root.plain ? 600 : 400;
             wrap: word-wrap;
             // A crumb with no space to break at wraps within the line, not past it.
@@ -140,7 +142,9 @@ component Crumbs inherits Rectangle {
 component Term inherits Text {
     color: Theme.mute;
     font-size: 12px;
-    vertical-alignment: center;
+    line-height-factor: Theme.lh-body;
+    // At the top of its row, as a grid cell's text, beside a value that wraps.
+    vertical-alignment: top;
 }
 
 // A labelled field (.field-label): its label over the control.
@@ -156,6 +160,7 @@ component Labelled inherits VerticalLayout {
         color: Theme.mute;
         font-size: 12px;
         font-weight: 500;
+        line-height-factor: Theme.lh-body;
         accessible-role: none;
     }
     @children
@@ -256,6 +261,7 @@ export component InspectorPane inherits Rectangle {
         Text {
             text: "Open a folder, then pick an episode to see what the batch does with it.";
             color: Theme.mute;
+            line-height-factor: Theme.lh-body;
             wrap: word-wrap;
         }
     }
@@ -274,6 +280,9 @@ export component InspectorPane inherits Rectangle {
                 font-family: "Unbounded";
                 font-size: 30px;
                 font-weight: 700;
+                line-height-factor: Theme.lh-num;
+                // .insp-num's -0.02em.
+                letter-spacing: -0.6px;
                 vertical-alignment: top;
             }
             // Takes the header's width, with crumbs or without.
@@ -286,6 +295,7 @@ export component InspectorPane inherits Rectangle {
                     color: Theme.fg;
                     font-size: 15px;
                     font-weight: 700;
+                    line-height-factor: Theme.lh-body;
                     // At a space, else anywhere, as overflow-wrap: anywhere does: a file name may
                     // have no space to break at, and is never cut.
                     wrap: word-wrap;
@@ -333,6 +343,7 @@ export component InspectorPane inherits Rectangle {
                             color: Theme.err;
                             font-family: "JetBrains Mono";
                             font-size: 12px;
+                            line-height-factor: Theme.lh-body-mono;
                             wrap: word-wrap;
                         }
                     }
@@ -386,6 +397,7 @@ export component InspectorPane inherits Rectangle {
                                                 : Theme.mute;
                                             font-size: 12px;
                                             font-weight: 600;
+                                            line-height-factor: Theme.lh-body;
                                             accessible-role: none;
                                         }
                                     }
@@ -398,6 +410,7 @@ export component InspectorPane inherits Rectangle {
                                 text: root.insp.video;
                                 color: Theme.fg;
                                 font-size: 12px;
+                                line-height-factor: Theme.lh-body;
                                 wrap: word-wrap;
                                 horizontal-stretch: 1;
                             }
@@ -408,6 +421,7 @@ export component InspectorPane inherits Rectangle {
                                 text: root.insp.audio;
                                 color: Theme.fg;
                                 font-size: 12px;
+                                line-height-factor: Theme.lh-body;
                                 wrap: word-wrap;
                                 horizontal-stretch: 1;
                             }
@@ -479,6 +493,7 @@ export component InspectorPane inherits Rectangle {
                                                 color: rung.chosen || rung.found ? Theme.fg : Theme.mute;
                                                 font-size: 12px;
                                                 font-weight: rung.chosen ? 600 : 400;
+                                                line-height-factor: Theme.lh-body;
                                                 overflow: elide;
                                                 accessible-role: none;
                                             }
@@ -489,6 +504,7 @@ export component InspectorPane inherits Rectangle {
                                                     text: rung.detail;
                                                     color: Theme.path;
                                                     font-size: 12px;
+                                                    line-height-factor: Theme.lh-body;
                                                     overflow: elide;
                                                     accessible-role: none;
                                                 }
@@ -614,6 +630,7 @@ export component InspectorPane inherits Rectangle {
                             text: root.insp.fonts;
                             color: Theme.path;
                             font-size: 12px;
+                            line-height-factor: Theme.lh-body;
                             wrap: word-wrap;
                         }
                     }

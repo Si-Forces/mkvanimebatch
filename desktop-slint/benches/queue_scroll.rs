@@ -112,9 +112,9 @@ const WINDOW: Duration = Duration::from_secs(30);
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(66);
 /// How many rows the batch processes at once.
 const IN_FLIGHT: usize = 8;
-/// A row's and a release header's height in queue.slint.
+/// A row's and a release header's height in queue.slint (`ListMetrics.head-height`).
 const ROW_H: f32 = 52.0;
-const HEAD_H: f32 = 30.0;
+const HEAD_H: f32 = 34.0;
 /// How many times `put_cost` times each kind of put.
 const PUT_RUNS: usize = 20;
 
@@ -368,7 +368,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let rows = synthetic_rows(ROWS);
     let releases = rows.chunk_by(|a, b| a.release == b.release).count();
-    let content = ROWS as f32 * ROW_H + releases as f32 * HEAD_H;
+    // The list's 16px bottom padding, under the last row.
+    let content = ROWS as f32 * ROW_H + releases as f32 * HEAD_H + 16.0;
     let mut state = ViewState::new(None);
     state.remux.title = "Bench".into();
     state.remux.empty = None;

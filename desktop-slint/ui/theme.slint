@@ -43,6 +43,27 @@ export global Theme {
     // σ30 (ADR-0017's glass gate) at scale 1, as CSS's blur(30px).
     out property <length> glass-blur: 30px;
 
+    // Line heights (style.css's line-height), as Text's line-height-factor: a factor of the font's
+    // natural line height, (ascent - descent + line gap) / em: Onest 1.275, Unbounded 1.240,
+    // JetBrains Mono 1.320, from their OS/2 typo metrics, which each font's USE_TYPO_METRICS flag
+    // has Slint (skrifa) read (hhea has the same values). So each is the CSS line-height over that
+    // natural one (tested against the font files, `ui_tests`). A Text's height rounds up to a whole
+    // pixel, so a line can come out up to 1px taller than the webview's.
+    // body { line-height: 1.45 }, in Onest:
+    out property <float> lh-body: 1.45 / 1.275;
+    // .nav-text's 1.2 (the mode tabs' and preset rows' name and subtitle):
+    out property <float> lh-nav: 1.2 / 1.275;
+    // .brand-name's 1.15:
+    out property <float> lh-brand: 1.15 / 1.275;
+    // .crumbs's 1.5:
+    out property <float> lh-crumbs: 1.5 / 1.275;
+    // .insp-num's 1, in Unbounded:
+    out property <float> lh-num: 1 / 1.240;
+    // .log-body's 1.6, in JetBrains Mono:
+    out property <float> lh-log: 1.6 / 1.320;
+    // body's 1.45 in JetBrains Mono (the Inspector error):
+    out property <float> lh-body-mono: 1.45 / 1.320;
+
     out property <length> window-radius: 14px;
     out property <length> pane-radius: 22px;
     // GlassPane's shadow blur; app.slint draws one at this blur from the first frame (a pre-warm).
