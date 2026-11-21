@@ -140,7 +140,7 @@ Both flicker while resizing under Xwayland and are smooth on native Wayland. X11
 
 ## Amendment — 2026-11-20 (Slint 1.19.0 from crates.io)
 
-**Decision 2's pin is taken (P7, #140).** Slint 1.19.0 was published on 2026-11-16. `slint`, `slint-build`, `i-slint-backend-testing` and `i-slint-core` are exact crates.io pins (`=1.19.0`) in the root `[workspace.dependencies]`, with decision 3's feature list, so the host and the generated UI crate share one version; no git dependency on Slint is left, so `cargo audit` sees Slint's tree again. `skia-bindings`'s `no-compile` pin moves to `=0.157.0`, the version 1.19.0's `skia-safe` resolves, and CI checks that the two agree. The language edition 1.19 introduces is not selected, so layouts keep their pre-1.19 behaviour; the parity work that touches layout opts in.
+**Decision 2's pin is taken (P7, #140).** Slint 1.19.0 was published on 2026-11-16. `slint`, `slint-build`, `i-slint-backend-testing` and `i-slint-core` are exact crates.io pins (`=1.19.0`) in the root `[workspace.dependencies]`, with decision 3's feature list, so the host and the generated UI crate share one version; no git dependency on Slint is left, so `cargo audit` sees Slint's tree again. `skia-bindings`'s `no-compile` pin moves to `=0.157.0`, the version 1.19.0's `skia-safe` resolves, and CI checks that the two agree. The language edition 1.19 introduces is not selected, so layouts keep their pre-1.19 behaviour; the parity work that touches layout opts in. (Parity W2 opts in, in `desktop-slint/ui/build.rs` alone: with no `slint-project.json`, slint-lsp, slint-viewer and the preview compile without the edition unless given `--edition 1.19`.)
 
 **Re-checked at 1.19.0** (paths in the crates.io sources):
 

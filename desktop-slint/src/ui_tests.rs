@@ -4245,7 +4245,8 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         .find(|head| head.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::None))
         .unwrap();
     assert_eq!(head.absolute_position().y, top, "at the list's top");
-    // .ep-group-head: 34px, its texts on the last 16px line, 6px above the bottom.
+    // .ep-group-head: 34px (queue.slint's `ListMetrics.head-height`), its texts on the last 16px
+    // line, 6px above the bottom.
     assert_eq!(head.size().height, 34.0, "the header's height");
     for text in head.query_descendants().match_type_name("Text").find_all() {
         let bottom = text.absolute_position().y + text.size().height;
@@ -4575,24 +4576,162 @@ fn text_takes_the_webviews_line_heights() {
     app.hide().unwrap();
 }
 
-/// The list ends 16px under its last row (.list's bottom padding).
+/// The list ends 16px under its last shown row (.list's bottom padding), under a filter that
+/// hides the last row too.
 #[test]
 fn the_list_ends_16px_under_its_last_row() {
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
-    apply(&app, &three_releases());
+    let publisher = SlintPublisher::new(&app);
+    let mut state = three_releases();
+    publisher.show(&state);
     app.show().unwrap();
-    app.set_remux_scroll(-100_000.0);
+    let under = |id: &str| {
+        // Scrolled to the end as the wheel does, a step at a time: a scroll set far past the end
+        // of a list whose last row is hidden (0px) leaves the testing backend's ListView with no
+        // row made.
+        frame(&app);
+        for _ in 0..100 {
+            let scroll = app.get_remux_scroll();
+            app.set_remux_scroll(scroll - 200.0);
+            frame(&app);
+            if app.get_remux_scroll() == scroll {
+                break;
+            }
+        }
+        let list = ElementHandle::find_by_element_id(&app, "QueuePane::list")
+            .next()
+            .unwrap();
+        // A row's checkbox is 18px under its top, in its 52px.
+        let check = only(&app, &format!("Include {id} in the batch"));
+        let row_bottom = check.absolute_position().y + check.size().height + 18.0;
+        list.absolute_position().y + list.size().height - row_bottom
+    };
+    assert_eq!(under("c03"), 16.0, "the last row");
+
+    // The last row done, under To do: the one before it is the last shown.
+    state.seq = 1;
+    let mut rows = state.remux.rows.to_vec();
+    rows.last_mut().unwrap().bucket = Some(Bucket::Done);
+    state.remux.rows = Arc::new(rows);
+    publisher.show(&state);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    assert_eq!(under("c02"), 16.0, "the last row To do shows");
+    app.hide().unwrap();
+}
+
+/// Theme's `lh-*` factors divide each CSS line height by the font's natural one, copied by hand
+/// from the embedded fonts: (ascent - descent + line gap) / em, which Slint (skrifa) takes from
+/// OS/2's typo metrics when the font sets USE_TYPO_METRICS, else from hhea. A font replaced by
+/// one with other metrics fails here, before it shifts every line height.
+#[test]
+fn the_line_height_factors_divide_by_the_embedded_fonts_natural_heights() {
+    fn natural(font: &[u8]) -> f32 {
+        let u16_at = |at: usize| u16::from_be_bytes([font[at], font[at + 1]]);
+        let i16_at = |at: usize| f32::from(i16::from_be_bytes([font[at], font[at + 1]]));
+        // The table directory: 16-byte records from byte 12, each a tag, a checksum, an offset.
+        let table = |tag: &[u8; 4]| {
+            let record = (0..usize::from(u16_at(4)))
+                .map(|i| 12 + 16 * i)
+                .find(|&record| &font[record..record + 4] == tag)
+                .unwrap();
+            (usize::from(u16_at(record + 8)) << 16) | usize::from(u16_at(record + 10))
+        };
+        let em = f32::from(u16_at(table(b"head") + 18));
+        let os2 = table(b"OS/2");
+        // fsSelection bit 7; sTypoAscender, sTypoDescender, sTypoLineGap; else hhea's three.
+        let metrics = if u16_at(os2 + 62) & 0x80 != 0 {
+            os2 + 68
+        } else {
+            table(b"hhea") + 4
+        };
+        (i16_at(metrics) - i16_at(metrics + 2) + i16_at(metrics + 4)) / em
+    }
+    let theme = include_str!("../ui/theme.slint");
+    for (font, tokens) in [
+        (
+            natural(include_bytes!("../ui/fonts/Onest-wght.ttf")),
+            &["lh-body", "lh-nav", "lh-brand", "lh-crumbs"][..],
+        ),
+        (
+            natural(include_bytes!("../ui/fonts/Unbounded-wght.ttf")),
+            &["lh-num"][..],
+        ),
+        (
+            natural(include_bytes!("../ui/fonts/JetBrainsMono-wght.ttf")),
+            &["lh-log", "lh-body-mono"][..],
+        ),
+    ] {
+        for token in tokens {
+            let line = theme
+                .lines()
+                .find(|line| line.contains(&format!("property <float> {token}:")))
+                .unwrap();
+            assert!(
+                line.ends_with(&format!(" / {font:.3};")),
+                "{token} against the font's {font:.3}: {line}"
+            );
+        }
+    }
+}
+
+/// The scanning card's spinner is .scan-spinner's 26px ring, not a row's 20px one.
+#[test]
+fn the_scanning_card_spins_a_26px_ring() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.empty = None;
+    state.remux.scan = ScanView::Scanning {
+        directory: "/media/Show".into(),
+    };
+    apply(&app, &state);
+    app.show().unwrap();
     frame(&app);
-    let list = ElementHandle::find_by_element_id(&app, "QueuePane::list")
-        .next()
-        .unwrap();
-    let bottom = list.absolute_position().y + list.size().height;
-    // A row's checkbox is 18px under its top, in its 52px.
-    let check = only(&app, "Include c03 in the batch");
-    let row_bottom = check.absolute_position().y + check.size().height + 18.0;
-    assert_eq!(bottom - row_bottom, 16.0);
+    let spinners: Vec<_> = ElementHandle::find_by_element_type_name(&app, "ScanSpinner").collect();
+    assert_eq!(spinners.len(), 1, "one spinner");
+    assert_eq!(spinners[0].size(), slint::LogicalSize::new(26.0, 26.0));
+    app.hide().unwrap();
+}
+
+/// The traffic lights and the steppers show the pointer: the webview draws both as `<button>`s,
+/// which style.css's `button { cursor: pointer }` covers.
+#[test]
+fn the_traffic_lights_and_the_steppers_show_the_pointer() {
+    use i_slint_backend_testing::testing_backend::TestingWindow;
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    use i_slint_core::window::WindowInner;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let pointer_over = |label: &str| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let element = only(&app, label);
+        let (at, size) = (element.absolute_position(), element.size());
+        hover_at(
+            &app,
+            slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0),
+        );
+        let adapter = WindowInner::from_pub(app.window()).window_adapter();
+        let window = adapter
+            .internal(i_slint_core::InternalToken)
+            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
+            .unwrap();
+        matches!(
+            window.mouse_cursor(),
+            MouseCursorInner::BuiltIn(BuiltInMouseCursor::Pointer)
+        )
+    };
+    assert!(pointer_over("Close window"), "a traffic light");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    assert!(pointer_over("Increase workers"), "a stepper");
     app.hide().unwrap();
 }
 

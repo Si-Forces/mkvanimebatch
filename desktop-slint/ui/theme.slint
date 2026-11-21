@@ -44,8 +44,11 @@ export global Theme {
     out property <length> glass-blur: 30px;
 
     // Line heights (style.css's line-height), as Text's line-height-factor: a factor of the font's
-    // natural line height, (ascent - descent + line gap) / em from its hhea table: Onest 1.275,
-    // Unbounded 1.240, JetBrains Mono 1.320. So each is the CSS line-height over that natural one.
+    // natural line height, (ascent - descent + line gap) / em: Onest 1.275, Unbounded 1.240,
+    // JetBrains Mono 1.320, from their OS/2 typo metrics, which each font's USE_TYPO_METRICS flag
+    // has Slint (skrifa) read (hhea has the same values). So each is the CSS line-height over that
+    // natural one (tested against the font files, `ui_tests`). A Text's height rounds up to a whole
+    // pixel, so a line can come out up to 1px taller than the webview's.
     // body { line-height: 1.45 }, in Onest:
     out property <float> lh-body: 1.45 / 1.275;
     // .nav-text's 1.2 (the mode tabs' name and subtitle):

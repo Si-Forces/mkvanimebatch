@@ -145,7 +145,7 @@ component LogConsole inherits Rectangle {
                 root.to-newest();
             }
         }
-        // 12px mono at .log-body's 1.6 line height.
+        // 12px mono at about .log-body's 1.6 line height: a line's Text rounds 19.2px up to 20.
         for line in root.rows: Rectangle {
             height: text.preferred-height;
             text := Text {
