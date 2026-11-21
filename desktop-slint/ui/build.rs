@@ -10,8 +10,10 @@ fn main() {
     // - a property set by only some states keeps its default in the others (#8852);
     // - a binding loop inside a longer one is an error too, so a later edit can hit a loop error
     //   the 1.18 rules did not report.
-    // Only this build sets it (no slint-project.json): slint-lsp, slint-viewer and the preview
-    // lay out with the 1.18 rules unless given `--edition 1.19`.
+    // Only this build sets it (no slint-project.json): slint-compiler and slint-viewer lay out
+    // with the 1.18 rules unless given `--edition 1.19`; slint-lsp takes no `--edition`, so it
+    // and its live preview always do (they would read a slint-project.json, which this repo
+    // does not add).
     let config = slint_build::CompilerConfiguration::new()
         .with_edition((1, 19))
         .with_style("fluent".into())

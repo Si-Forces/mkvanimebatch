@@ -711,4 +711,43 @@ mod tests {
         }
         app.hide().unwrap();
     }
+
+    /// .log-body's 8px padding scrolls with the lines: the list fills the console, the first line
+    /// sits 8px under its top at the start, and the newest 8px above its bottom when followed.
+    #[test]
+    fn the_console_pads_its_first_and_last_lines_by_8px() {
+        use i_slint_backend_testing::AccessibleLiveness;
+        let runtime = runtime();
+        let (app, _core, publisher) = open_console(&runtime);
+        let line = |text: &str| {
+            ElementHandle::find_by_accessible_label(&app, text)
+                .next()
+                .unwrap()
+        };
+        let list = || {
+            ElementHandle::find_by_accessible_label(&app, "Log")
+                .find(|element| {
+                    element.accessible_live_region() == Some(AccessibleLiveness::Polite)
+                })
+                .unwrap()
+        };
+        publisher.show_logs(&[notes(0, 0, 0, 0, 3)]);
+        frames(&app);
+        let first = line("line 0").absolute_position().y - list().absolute_position().y;
+        assert!(
+            (first - 8.0).abs() < 0.01,
+            "the first line at the start: {first}"
+        );
+
+        publisher.show_logs(&[notes(0, 3, 0, 3, 200)]);
+        frames(&app);
+        let (list, newest) = (list(), line("line 202"));
+        let under = list.absolute_position().y + list.size().height
+            - (newest.absolute_position().y + newest.size().height);
+        assert!(
+            (under - 8.0).abs() < 0.01,
+            "the newest line, followed: {under}"
+        );
+        app.hide().unwrap();
+    }
 }

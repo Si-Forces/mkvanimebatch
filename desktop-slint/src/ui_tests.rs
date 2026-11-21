@@ -4452,8 +4452,9 @@ fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
     app.hide().unwrap();
 }
 
-/// Reduce motion stops the spinning rings: a processing row's ring, drawn, turns with the
-/// animation tick, and stands still under Reduce motion, the window drawing no frame for it.
+/// Reduce motion stops the spinning rings: a processing row's ring and the scanning card's
+/// spinner, drawn, turn with the animation tick, and stand still under Reduce motion, the window
+/// drawing no frame for them.
 #[test]
 fn reduce_motion_stops_the_spinning_rings() {
     use std::time::Duration;
@@ -4485,6 +4486,18 @@ fn reduce_motion_stops_the_spinning_rings() {
     assert!(animated(), "the ring spins");
     app.global::<Theme>().set_reduce_motion(true);
     assert!(!animated(), "the ring stands still");
+
+    // The scanning card's spinner, with no row left to spin.
+    app.global::<Theme>().set_reduce_motion(false);
+    let mut scanning = ViewState::new(None);
+    scanning.remux.empty = None;
+    scanning.remux.scan = ScanView::Scanning {
+        directory: "/media/Show".into(),
+    };
+    apply(&app, &scanning);
+    assert!(animated(), "the spinner spins");
+    app.global::<Theme>().set_reduce_motion(true);
+    assert!(!animated(), "the spinner stands still");
     app.hide().unwrap();
 }
 
@@ -4538,9 +4551,10 @@ fn the_appearance_button_reports_its_menu_expanded() {
     app.hide().unwrap();
 }
 
-/// Text takes style.css's line heights (body 1.45, .nav-text 1.2, .log-body 1.6), each rounded
-/// up to a whole pixel, and the chips their box around it: the list header's title, chips and
-/// hint, a mode tab with a wrapped subtitle, and a log line that wraps.
+/// Text takes style.css's line heights (body 1.45, .nav-text 1.2, .log-body 1.6, .brand-name
+/// 1.15, .crumbs 1.5, .insp-num 1), each rounded up to a whole pixel, and the chips their box
+/// around it: the list header's title, chips and hint, a mode tab with a wrapped subtitle, a log
+/// line that wraps, the brand's subtitle, a crumb, and the Inspector's number and error.
 #[test]
 fn text_takes_the_webviews_line_heights() {
     use mkv_anime_batch_slint_ui::{LogRow, LogTone};
@@ -4573,6 +4587,39 @@ fn text_takes_the_webviews_line_heights() {
     assert_eq!(height("Remux"), 56.0, "a mode tab");
     // Two lines of 12px × 1.6 = 38.4.
     assert_eq!(height(line), 39.0, "a log line on two lines");
+    // .brand-name's 1.15: the 11px subtitle 12.65.
+    // Unlabelled (`accessible-role: none`): found by its id.
+    let subtitle = ElementHandle::find_by_element_id(&app, "TitleBar::subtitle")
+        .next()
+        .unwrap();
+    assert_eq!(subtitle.size().height, 13.0, "the brand's subtitle");
+
+    // A path in the list header and an Inspector with an error.
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    state.remux.crumbs = vec!["Anime".into(), "Show".into()];
+    let mut view = sample_view();
+    view.error = Some("Inspection failed".into());
+    // No crumbs, so the number sets the header's height, not the column beside it.
+    view.crumbs = Vec::new();
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+    frame(&app);
+    // .crumbs's 1.5: 12px × 1.5 = 18.
+    assert_eq!(height("Show"), 18.0, "a crumb");
+    // .insp-num's 1: 30px.
+    assert_eq!(height("03"), 30.0, "the Inspector's number");
+    // body's 1.45 in mono: 12px × 1.45 = 17.4.
+    let error: Vec<_> = ElementHandle::find_by_element_type_name(&app, "TextInput")
+        .filter(|element| element.accessible_value().as_deref() == Some("Inspection failed"))
+        .collect();
+    assert_eq!(error.len(), 1, "one error field");
+    assert_eq!(
+        error[0].size().height,
+        18.0,
+        "the Inspector's error on one line"
+    );
     app.hide().unwrap();
 }
 
@@ -4621,21 +4668,30 @@ fn the_list_ends_16px_under_its_last_row() {
     app.hide().unwrap();
 }
 
-/// Theme's `lh-*` factors divide each CSS line height by the font's natural one, copied by hand
-/// from the embedded fonts: (ascent - descent + line gap) / em, which Slint (skrifa) takes from
-/// OS/2's typo metrics when the font sets USE_TYPO_METRICS, else from hhea. A font replaced by
-/// one with other metrics fails here, before it shifts every line height.
+/// Theme's `lh-*` factors divide each CSS line height by its font's natural one, (ascent -
+/// descent + line gap) / em, which Slint (skrifa) takes from OS/2's typo metrics when the font sets
+/// USE_TYPO_METRICS, else from hhea. The compiled factors are checked against the CSS heights
+/// and the embedded fonts, so a replaced font or a changed factor fails here, before it shifts
+/// every line height.
 #[test]
 fn the_line_height_factors_divide_by_the_embedded_fonts_natural_heights() {
-    fn natural(font: &[u8]) -> f32 {
-        let u16_at = |at: usize| u16::from_be_bytes([font[at], font[at + 1]]);
-        let i16_at = |at: usize| f32::from(i16::from_be_bytes([font[at], font[at + 1]]));
+    /// The natural line height in ems of `font`, which `token` uses.
+    fn natural(font: &[u8], token: &str) -> f32 {
+        let pair = |at: usize| -> [u8; 2] {
+            font.get(at..at + 2)
+                .and_then(|bytes| bytes.try_into().ok())
+                .unwrap_or_else(|| panic!("{token}'s font ends before byte {at}"))
+        };
+        let u16_at = |at: usize| u16::from_be_bytes(pair(at));
+        let i16_at = |at: usize| f32::from(i16::from_be_bytes(pair(at)));
         // The table directory: 16-byte records from byte 12, each a tag, a checksum, an offset.
         let table = |tag: &[u8; 4]| {
             let record = (0..usize::from(u16_at(4)))
                 .map(|i| 12 + 16 * i)
-                .find(|&record| &font[record..record + 4] == tag)
-                .unwrap();
+                .find(|&record| font.get(record..record + 4) == Some(&tag[..]))
+                .unwrap_or_else(|| {
+                    panic!("{token}'s font has no {}", String::from_utf8_lossy(tag))
+                });
             (usize::from(u16_at(record + 8)) << 16) | usize::from(u16_at(record + 10))
         };
         let em = f32::from(u16_at(table(b"head") + 18));
@@ -4648,32 +4704,31 @@ fn the_line_height_factors_divide_by_the_embedded_fonts_natural_heights() {
         };
         (i16_at(metrics) - i16_at(metrics + 2) + i16_at(metrics + 4)) / em
     }
-    let theme = include_str!("../ui/theme.slint");
-    for (font, tokens) in [
-        (
-            natural(include_bytes!("../ui/fonts/Onest-wght.ttf")),
-            &["lh-body", "lh-nav", "lh-brand", "lh-crumbs"][..],
-        ),
-        (
-            natural(include_bytes!("../ui/fonts/Unbounded-wght.ttf")),
-            &["lh-num"][..],
-        ),
-        (
-            natural(include_bytes!("../ui/fonts/JetBrainsMono-wght.ttf")),
-            &["lh-log", "lh-body-mono"][..],
-        ),
+    const ONEST: &[u8] = include_bytes!("../ui/fonts/Onest-wght.ttf");
+    const UNBOUNDED: &[u8] = include_bytes!("../ui/fonts/Unbounded-wght.ttf");
+    const MONO: &[u8] = include_bytes!("../ui/fonts/JetBrainsMono-wght.ttf");
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    let theme = app.global::<Theme>();
+    // Each token, its CSS line height, its font and its compiled factor; every wrong one is named.
+    let mut wrong = Vec::new();
+    for (token, css, font, factor) in [
+        ("lh-body", 1.45, ONEST, theme.get_lh_body()),
+        ("lh-nav", 1.2, ONEST, theme.get_lh_nav()),
+        ("lh-brand", 1.15, ONEST, theme.get_lh_brand()),
+        ("lh-crumbs", 1.5, ONEST, theme.get_lh_crumbs()),
+        ("lh-num", 1.0, UNBOUNDED, theme.get_lh_num()),
+        ("lh-log", 1.6, MONO, theme.get_lh_log()),
+        ("lh-body-mono", 1.45, MONO, theme.get_lh_body_mono()),
     ] {
-        for token in tokens {
-            let line = theme
-                .lines()
-                .find(|line| line.contains(&format!("property <float> {token}:")))
-                .unwrap();
-            assert!(
-                line.ends_with(&format!(" / {font:.3};")),
-                "{token} against the font's {font:.3}: {line}"
-            );
+        let natural = natural(font, token);
+        if (factor - css / natural).abs() >= 1e-4 {
+            wrong.push(format!(
+                "{token} is {factor}, not {css} / the font's {natural:.4}"
+            ));
         }
     }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// The scanning card's spinner is .scan-spinner's 26px ring, not a row's 20px one.

@@ -115,7 +115,9 @@ component Ring inherits Rectangle {
 }
 
 // The scanning card's spinner (.scan-spinner): a 26px ring 3px wide, its top quarter (the
-// border-top between the corners' diagonals) in the info tone.
+// border-top between the corners' diagonals) in the info tone. Its paths keep their coordinates
+// (`fit: preserve`): the default fit would scale the 26-unit viewbox into 26px less the stroke,
+// a 23.35px ring, where the coordinates already keep the stroke inside.
 component ScanSpinner inherits Rectangle {
     width: 26px;
     height: 26px;
@@ -125,6 +127,7 @@ component ScanSpinner inherits Rectangle {
         height: 26px;
         viewbox-width: 26;
         viewbox-height: 26;
+        fit: preserve;
         stroke: Theme.line;
         stroke-width: 3px;
         commands: "M 13 1.5 A 11.5 11.5 0 1 1 12.99 1.5";
@@ -134,6 +137,7 @@ component ScanSpinner inherits Rectangle {
         height: 26px;
         viewbox-width: 26;
         viewbox-height: 26;
+        fit: preserve;
         stroke: Theme.info;
         stroke-width: 3px;
         transform-rotation: Spin.scan-turn;
