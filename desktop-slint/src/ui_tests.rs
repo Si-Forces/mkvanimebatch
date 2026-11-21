@@ -3454,6 +3454,7 @@ fn a_far_tab_into_the_list_leaves_no_stale_pinned_header() {
             .size()
             .height
     };
+    // 86: a release head (queue.slint's `ListMetrics.head-height`, 34px) over a 52px row.
     let height = 640.0 + 86.0 + 7.0 * 52.0 + 16.0 - list();
     app.window()
         .set_size(slint::LogicalSize::new(920.0, height));
@@ -4234,6 +4235,7 @@ fn the_current_release_header_stays_pinned_at_the_top_of_the_list() {
         let text = app.get_remux_pinned();
         (!text.is_empty()).then(|| format!("{text} {}", app.get_remux_pinned_count()))
     };
+    // The checkbox sits 18px into its row, under a 34px head (`ListMetrics.head-height`).
     let top = only(&app, "Include a00 in the batch").absolute_position().y - 34.0 - 18.0;
 
     assert_eq!(pinned(&app), None, "the first header shows in place");

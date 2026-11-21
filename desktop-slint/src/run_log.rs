@@ -733,6 +733,13 @@ mod tests {
         };
         publisher.show_logs(&[notes(0, 0, 0, 0, 3)]);
         frames(&app);
+        // The list fills its console, so the padding is the lines' alone, not a viewport inset.
+        let fills = ElementHandle::find_by_element_type_name(&app, "LogConsole").any(|console| {
+            let list = list();
+            console.absolute_position().y == list.absolute_position().y
+                && console.size().height == list.size().height
+        });
+        assert!(fills, "the list fills its console");
         let first = line("line 0").absolute_position().y - list().absolute_position().y;
         assert!(
             (first - 8.0).abs() < 0.01,
