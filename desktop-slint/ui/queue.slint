@@ -76,7 +76,9 @@ export global Spin {
     out property <angle> scan-turn: Theme.reduce-motion ? 0deg : mod(animation-tick(), 1000ms) / 1000ms * 360deg;
 }
 
-// The status ring (.ep-ring): a track and the progress arc, or a spinning quarter.
+// The status ring (.ep-ring): a track and the progress arc, or a spinning quarter. Its paths keep
+// their coordinates (`fit: preserve`, which takes no viewbox) so the 3px stroke fills 19px of the
+// 20px box instead of shrinking to the viewbox's inset.
 component Ring inherits Rectangle {
     in property <float> progress;
     in property <bool> spinning;
@@ -87,8 +89,7 @@ component Ring inherits Rectangle {
     Path {
         width: 20px;
         height: 20px;
-        viewbox-width: 20;
-        viewbox-height: 20;
+        fit: preserve;
         stroke: Theme.line;
         stroke-width: 3px;
         commands: "M 10 2 A 8 8 0 1 1 9.99 2";
@@ -96,8 +97,7 @@ component Ring inherits Rectangle {
     Path {
         width: 20px;
         height: 20px;
-        viewbox-width: 20;
-        viewbox-height: 20;
+        fit: preserve;
         stroke: Theme.info;
         stroke-width: 3px;
         stroke-line-cap: round;

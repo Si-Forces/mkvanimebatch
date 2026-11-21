@@ -5578,3 +5578,75 @@ fn custom_complexity_slider_handles_keys_drag_and_accessibility() {
     );
     app.hide().unwrap();
 }
+
+/// The row status ring keeps its coordinates (`fit: preserve`) so its 3px stroke fills 19px of
+/// its 20px box instead of shrinking to the viewbox's inset (both the progress arc and the
+/// neutral track in the unpainted quarter).
+#[test]
+fn status_ring_fills_19px_of_its_20px_box() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        tone: Tone::Info,
+        progress: Some(75.0),
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    let shot = app.window().take_snapshot().unwrap();
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("the status ring");
+    let (at, size) = (ring.absolute_position(), ring.size());
+    assert_eq!(size, slint::LogicalSize::new(20.0, 20.0));
+    let (x0, y0) = (at.x.round() as u32, at.y.round() as u32);
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0, u32::MAX, 0);
+    for dy in 0..20 {
+        for dx in 0..20 {
+            let idx = ((y0 + dy) * shot.width() + (x0 + dx)) as usize;
+            let px = shot.as_slice()[idx];
+            if px.b > px.r.saturating_add(30) {
+                min_x = min_x.min(dx);
+                max_x = max_x.max(dx);
+                min_y = min_y.min(dy);
+                max_y = max_y.max(dy);
+            }
+        }
+    }
+    assert!(min_x <= max_x, "no info-tone pixels drawn in Ring");
+    let span_x = max_x - min_x + 1;
+    let span_y = max_y - min_y + 1;
+    assert!(
+        (19..=20).contains(&span_x) && (19..=20).contains(&span_y),
+        "expected 19px painted ring inside 20px box, got {span_x}x{span_y} (x={min_x}..={max_x}, y={min_y}..={max_y})"
+    );
+
+    // Sample the neutral Theme.line track in the unpainted top-left quadrant (dx < 8, dy < 8)
+    // against the unpainted ring centre (10, 10): removing or shrinking the track fails this.
+    let center = shot.as_slice()[((y0 + 10) * shot.width() + (x0 + 10)) as usize];
+    let mut track_pixels = 0u32;
+    let mut max_track_r = 0.0f32;
+    for dy in 0..8 {
+        for dx in 0..8 {
+            let px = shot.as_slice()[((y0 + dy) * shot.width() + (x0 + dx)) as usize];
+            let diff = px.r.abs_diff(center.r) as u32
+                + px.g.abs_diff(center.g) as u32
+                + px.b.abs_diff(center.b) as u32;
+            if diff >= 18 && px.b <= px.r.saturating_add(20) {
+                track_pixels += 1;
+                let r = (dx as f32 + 0.5 - 10.0).hypot(dy as f32 + 0.5 - 10.0);
+                max_track_r = max_track_r.max(r);
+            }
+        }
+    }
+    assert!(
+        track_pixels >= 8 && max_track_r >= 8.5,
+        "expected full-size neutral track in Ring's unpainted top-left quarter, got {track_pixels} px, max radius {max_track_r:.2}"
+    );
+    app.hide().unwrap();
+}
