@@ -18,7 +18,7 @@ mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::{App, Focus};
+use mkv_anime_batch_slint_ui::{App, Focus, Tip};
 use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
@@ -329,16 +329,24 @@ fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Tim
     let pressed = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
         // Any left press, on a fluent widget or a blank area too, hides the ring until a key
-        // (`Focus.keyboard`, :focus-visible); a Pressable's own press clears it as well.
-        if let WindowEvent::MouseInput {
-            state: ElementState::Pressed,
-            button: MouseButton::Left,
-            ..
-        } = event
-        {
-            if let Some(app) = pressed.upgrade() {
-                app.global::<Focus>().set_keyboard(false);
+        // (`Focus.keyboard`, :focus-visible) and dismisses any hover tooltip like a browser.
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(app) = pressed.upgrade() {
+                    app.global::<Focus>().set_keyboard(false);
+                    app.global::<Tip>().invoke_hide();
+                }
             }
+            WindowEvent::CursorLeft { .. } | WindowEvent::MouseWheel { .. } => {
+                if let Some(app) = pressed.upgrade() {
+                    app.global::<Tip>().invoke_hide();
+                }
+            }
+            _ => {}
         }
         // The borrow ends before `told` sends.
         let change = seen.borrow_mut().event(event);

@@ -5,7 +5,7 @@ import "fonts/Unbounded-wght.ttf";
 import "fonts/JetBrainsMono-wght.ttf";
 import { Theme } from "theme.slint";
 import { AppearanceMenu, TitleBar } from "title-bar.slint";
-import { Focus, Pressable } from "focus.slint";
+import { Focus, Pressable, Tip, TipCard } from "focus.slint";
 import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone, Spin } from "queue.slint";
@@ -15,7 +15,7 @@ import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone, T
 import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, Focus, Spin, FontProbe, CrumbPart, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
+export { Theme, Focus, Tip, Spin, FontProbe, CrumbPart, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
 
 // A mode's tab in the sidebar (.task-row): its icon, its name over what it does and its status
 // pill (a dot), then the gear that opens its settings sheet.
@@ -363,10 +363,20 @@ export component App inherits Window {
     // dialog opens, also when `sheet-open` or `dialog-open` is set without `open-sheet` or
     // `show-dialog`: its choices would act behind it.
     changed sheet-open => {
+        Tip.hide();
         root.sheet-made = self.sheet-open;
         if self.sheet-open {
             root.appearance-open = false;
         }
+    }
+    changed appearance-open => {
+        Tip.hide();
+    }
+    changed log-open => {
+        Tip.hide();
+    }
+    changed mode => {
+        Tip.hide();
     }
     // The dialog opened: it is made a pass later (`dialog-made`), and the Appearance menu closes.
     // It closed: what had the focus takes it back, as a closing <dialog> gives it back. Over the
@@ -374,6 +384,7 @@ export component App inherits Window {
     // sheet's fallback); with no sheet the window's key scope takes it first, so Esc still
     // reaches it when the control is gone or locked (the removed dialog dropped the focus).
     changed dialog-open => {
+        Tip.hide();
         root.dialog-made = self.dialog-open;
         if self.dialog-open {
             root.appearance-open = false;
@@ -461,6 +472,22 @@ export component App inherits Window {
         insp-pane.flush();
     }
 
+    // A tooltip stays alive while the window pointer matches the position last reported by its
+    // owning TipArea/Pressable. On a pointer move `tip-watch.mouse-x/y` updates before the
+    // owner's deferred `changed` handler runs, so `tip-stale-timer` debounces the mismatch
+    // check (100ms) and `TipCard` renders on `Tip.visible` alone: small moves inside a live
+    // control never flicker or cancel the card, while a move after the owner disappears clears
+    // `Tip` once the debounce fires so returning to the old pixel never revives it.
+    property <bool> tip-alive: Tip.text != "" && tip-watch.has-hover
+        && abs(tip-watch.mouse-x - Tip.owner-x) <= 0.5px
+        && abs(tip-watch.mouse-y - Tip.owner-y) <= 0.5px;
+    property <int> tip-serial: Tip.serial;
+    changed tip-serial => {
+        if root.tip-alive && !Tip.visible {
+            tip-timer.restart();
+        }
+    }
+
     Rectangle {
         // Placed, so the window's size (which picks the pane widths above) is not its content's.
         x: 0;
@@ -531,48 +558,68 @@ export component App inherits Window {
             background: @radial-gradient(ellipse 1100px 700px at self.cx 0px, Theme.wall-a 0%, Theme.wall-a.transparentize(100%) 60%);
         }
 
-        // The window's keys (app.js's keydown): this scope holds the focus from the start, so a
-        // key reaches it before anything took the focus. Ctrl+T (Cmd+T: Slint reads Cmd as
-        // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
-        // Appearance menu included, so it is caught before the focused item. Esc closes the
-        // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
-        // themselves, is open; it bubbles here from whatever has the focus. It notes which way each
-        // Tab goes (`Focus.backward`) for the queue list's entry stops.
-        keys := FocusScope {
-            focus-on-click: false;
-            focus-on-tab-navigation: false;
-            init => { self.focus(); }
-            capture-key-pressed(event) => {
-                if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
-                    Theme.toggle();
-                    return accept;
+        // Window-level pointer watcher: compares the real window pointer against the active
+        // TipArea/Pressable's last reported position so a tooltip can never stay stuck after its
+        // hovered element is removed by an `if` or row reset, and hides on exit/press/scroll.
+        tip-watch := TouchArea {
+            changed has-hover => {
+                if !self.has-hover {
+                    Tip.hide();
                 }
-                if event.text == Key.Tab || event.text == Key.Backtab {
-                    Focus.backward = event.text == Key.Backtab || event.modifiers.shift;
+            }
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                    Tip.hide();
                 }
-                // A key the user typed shows the focused control's ring (:focus-visible), not a
-                // modifier alone nor a shortcut.
-                if !(event.modifiers.control || event.modifiers.meta || event.modifiers.alt)
-                    && event.text != Key.Shift && event.text != Key.ShiftR
-                    && event.text != Key.Control && event.text != Key.ControlR
-                    && event.text != Key.Alt && event.text != Key.AltGr
-                    && event.text != Key.Meta && event.text != Key.MetaR
-                    && event.text != Key.CapsLock {
-                    Focus.keyboard = true;
-                }
+            }
+            scroll-event(event) => {
+                Tip.hide();
                 reject
             }
-            key-pressed(event) => {
-                if event.text == Key.Escape && root.appearance-open {
-                    root.close-appearance();
-                    return accept;
+
+            // The window's keys (app.js's keydown): this scope holds the focus from the start, so a
+            // key reaches it before anything took the focus. Ctrl+T (Cmd+T: Slint reads Cmd as
+            // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
+            // Appearance menu included, so it is caught before the focused item. Esc closes the
+            // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
+            // themselves, is open; it bubbles here from whatever has the focus. It notes which way each
+            // Tab goes (`Focus.backward`) for the queue list's entry stops.
+            keys := FocusScope {
+                focus-on-click: false;
+                focus-on-tab-navigation: false;
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    Tip.hide();
+                    if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
+                        Theme.toggle();
+                        return accept;
+                    }
+                    if event.text == Key.Tab || event.text == Key.Backtab {
+                        Focus.backward = event.text == Key.Backtab || event.modifiers.shift;
+                    }
+                    // A key the user typed shows the focused control's ring (:focus-visible), not a
+                    // modifier alone nor a shortcut.
+                    if !(event.modifiers.control || event.modifiers.meta || event.modifiers.alt)
+                        && event.text != Key.Shift && event.text != Key.ShiftR
+                        && event.text != Key.Control && event.text != Key.ControlR
+                        && event.text != Key.Alt && event.text != Key.AltGr
+                        && event.text != Key.Meta && event.text != Key.MetaR
+                        && event.text != Key.CapsLock {
+                        Focus.keyboard = true;
+                    }
+                    reject
                 }
-                if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
-                    root.close-log();
-                    return accept;
+                key-pressed(event) => {
+                    if event.text == Key.Escape && root.appearance-open {
+                        root.close-appearance();
+                        return accept;
+                    }
+                    if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
+                        root.close-log();
+                        return accept;
+                    }
+                    reject
                 }
-                reject
-            }
             VerticalLayout {
                 title-bar := TitleBar {
                     appearance-open: root.appearance-open;
@@ -933,6 +980,34 @@ export component App inherits Window {
                 serial: root.dialog-serial;
                 answered(confirmed) => { root.dialog-answered(confirmed); }
             }
+            }
+        }
+
+        tip-stale-timer := Timer {
+            interval: 100ms;
+            running: Tip.text != "" && !root.tip-alive;
+            triggered => {
+                if !root.tip-alive {
+                    Tip.hide();
+                }
+            }
+        }
+        // Hover tooltip overlay and 500ms show delay (matching Slint's TooltipArea and GTK).
+        tip-timer := Timer {
+            interval: 500ms;
+            running: root.tip-alive && !Tip.visible;
+            triggered => {
+                if root.tip-alive {
+                    Tip.show();
+                }
+            }
+        }
+        if Tip.visible: TipCard {
+            text: Tip.text;
+            pointer-x: Tip.x;
+            pointer-y: Tip.y;
+            window-width: root.width;
+            window-height: root.height;
         }
     }
 }

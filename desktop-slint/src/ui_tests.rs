@@ -5774,3 +5774,431 @@ fn inspector_crumbs_show_path_tooltips_and_separate_chevron_texts() {
     assert_eq!(tips(), 0, "plain default output folder shows no tooltip");
     app.hide().unwrap();
 }
+
+/// Tooltips drop 24px below the pointer hotspot (clearing a 24px cursor like GTK), flip above near
+/// the window bottom, stay on one line for sentence tips while wrapping long paths at 440px,
+/// centre horizontally on the pointer, clamp inside both window edges, and keep the tooltip plus
+/// `not-allowed` cursor on disabled buttons (`Run remux`).
+#[test]
+fn tooltips_place_below_cursor_centred_and_clamped_in_window() {
+    use i_slint_backend_testing::testing_backend::TestingWindow;
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    use i_slint_core::window::WindowInner;
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    app.global::<Theme>().invoke_set_dark(true);
+    let mut state = ViewState::new(None);
+    let mut view = sample_view();
+    view.crumbs = vec![
+        "media".into(),
+        "Anime".into(),
+        "Frieren Beyond Journeys End Season 1".into(),
+    ];
+    state.remux.inspector = Some(view);
+    state.remux.controls.run_disabled = true;
+    state.remux.controls.run_title = "Open a folder with episodes first".into();
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+
+    let hover_el = |el: &ElementHandle| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (el.absolute_position(), el.size());
+        let p = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: p });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+        p
+    };
+    let card = || {
+        ElementHandle::find_by_element_type_name(&app, "TipCard")
+            .next()
+            .expect("visible TipCard")
+    };
+    let cursor_now = || {
+        let adapter = WindowInner::from_pub(app.window()).window_adapter();
+        let window = adapter
+            .internal(i_slint_core::InternalToken)
+            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
+            .expect("TestingWindow");
+        window.mouse_cursor()
+    };
+
+    // Near the right window edge: card drops >= 20px below the cursor, right-edge clamp engages
+    // (right == 912), and the gap under the cursor is untouched (no 18x12 ToolTipImpl box).
+    let crumb = only(&app, "media › Anime › Frieren Beyond Journeys End Season 1");
+    let before_right = app.window().take_snapshot().unwrap();
+    let pr = hover_el(&crumb);
+    let cr = card();
+    let (cr_at, cr_size) = (cr.absolute_position(), cr.size());
+    assert!(
+        cr_at.y >= pr.y + 20.0,
+        "right tooltip top {} must be >= pointer.y {} + 20",
+        cr_at.y,
+        pr.y
+    );
+    assert!(
+        ((cr_at.x + cr_size.width) - 912.0).abs() <= 0.5,
+        "right tooltip right edge {} must clamp to 912",
+        cr_at.x + cr_size.width
+    );
+    let after_right = app.window().take_snapshot().unwrap();
+    let gap_idx =
+        ((pr.y + 10.0).round() as u32 * after_right.width() + pr.x.round() as u32) as usize;
+    assert_eq!(
+        before_right.as_slice()[gap_idx],
+        after_right.as_slice()[gap_idx],
+        "no ToolTipImpl box painted in the cursor gap above the tooltip card"
+    );
+
+    // Near the left window edge: card drops >= 20px below the cursor and left-edge clamp engages
+    // (x == 8).
+    let close = only(&app, "Close window");
+    let pl = hover_el(&close);
+    let cl = card();
+    let (cl_at, _) = (cl.absolute_position(), cl.size());
+    assert!(
+        cl_at.y >= pl.y + 20.0,
+        "left tooltip top {} must be >= pointer.y {} + 20",
+        cl_at.y,
+        pl.y
+    );
+    assert!(
+        (cl_at.x - 8.0).abs() <= 0.5,
+        "left tooltip left edge {} must clamp to 8",
+        cl_at.x
+    );
+
+    // Near the window bottom on disabled Run remux: flips above the pointer (bottom <= pointer.y - 8,
+    // top >= 8), keeps its tooltip while disabled, and shows the not-allowed cursor.
+    let run = only(&app, "Run remux");
+    let pb = hover_el(&run);
+    assert_eq!(
+        cursor_now(),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "disabled Run remux must show not-allowed cursor"
+    );
+    let cb = card();
+    let (cb_at, cb_size) = (cb.absolute_position(), cb.size());
+    assert!(
+        cb_at.y >= 8.0 && cb_at.y + cb_size.height <= pb.y - 7.5,
+        "bottom tooltip [{}, {}] must flip above pointer.y {} within top margin 8",
+        cb_at.y,
+        cb_at.y + cb_size.height,
+        pb.y
+    );
+
+    // Long path tip wraps at 440px onto multiple lines.
+    let mut long_view = sample_view();
+    long_view.crumbs = vec![
+        "media".into(),
+        "Anime".into(),
+        "Very Long Series Title With Season Information And Release Group".into(),
+        "Episode 01 Extended Cut 1080p Dual Audio.mkv".into(),
+    ];
+    let mut long_state = ViewState::new(None);
+    long_state.remux.inspector = Some(long_view);
+    apply(&app, &long_state);
+    frame(&app);
+    let long_crumb = only(
+        &app,
+        "media › Anime › Very Long Series Title With Season Information And Release Group › Episode 01 Extended Cut 1080p Dual Audio.mkv",
+    );
+    hover_el(&long_crumb);
+    let cw = card();
+    let cw_size = cw.size();
+    assert!(
+        cw_size.width <= 440.5 && cw_size.width >= 380.0 && cw_size.height > 32.0,
+        "long path tooltip should wrap at 440px onto multiple lines, got {}x{}",
+        cw_size.width,
+        cw_size.height
+    );
+
+    // Middle (Encoder complexity box in SettingsSheet): >= 20px below cursor, horizontally centred
+    // on the pointer, and single-line (not wrapped at 320px).
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let cplx = only(&app, "Encoder complexity value");
+    let pm = hover_el(&cplx);
+    let cm = card();
+    let (cm_at, cm_size) = (cm.absolute_position(), cm.size());
+    assert!(
+        cm_at.y >= pm.y + 20.0,
+        "complexity tooltip top {} must be >= pointer.y {} + 20",
+        cm_at.y,
+        pm.y
+    );
+    let center_x = cm_at.x + cm_size.width / 2.0;
+    assert!(
+        (center_x - pm.x).abs() <= 2.0,
+        "complexity tooltip center {center_x} must be within 2px of pointer.x {}",
+        pm.x
+    );
+    assert!(
+        cm_size.height <= 32.0 && cm_size.width > 320.0,
+        "complexity tooltip should stay on one line (> 320px wide, <= 32px tall), got {}x{}",
+        cm_size.width,
+        cm_size.height
+    );
+    app.hide().unwrap();
+}
+
+/// Tooltips cannot outlive a removed element, cannot be killed by a stale leave from the previous
+/// control, and hide like a browser `title` on pointer exit, any key press, left press over any
+/// TipArea (row status, Field label), wheel scroll, and sheet/dialog/mode transitions.
+#[test]
+fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
+    use crate::Tip;
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        title: "Encoding audio track".into(),
+        tone: Tone::Info,
+        progress: Some(50.0),
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+
+    let tip_count = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+    let hover_pos = |p: slint::LogicalPosition| {
+        app.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: p });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+    };
+    let hover_el = |el: &ElementHandle| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (el.absolute_position(), el.size());
+        let p = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        hover_pos(p);
+        p
+    };
+
+    // 1. Small moves inside the same control keep a shown tooltip visible (no single-frame blink
+    // or premature 0ms stale-timer cancellation before TipArea's deferred `changed` handler runs).
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("row status Ring");
+    let row_pos = hover_el(&ring);
+    assert_eq!(tip_count(), 1, "row status tooltip shows on hover");
+    for step in 1..=4 {
+        let p = slint::LogicalPosition::new(row_pos.x + (step as f32 - 2.0) * 2.0, row_pos.y);
+        app.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: p });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(30));
+        assert_eq!(
+            tip_count(),
+            1,
+            "move {step} inside the same control must keep TipCard visible"
+        );
+    }
+
+    // Left press on a non-Pressable TipArea (row status) hides the tip and keeps it quiet until
+    // the pointer leaves; wheel scroll over it also hides it.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: row_pos,
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: row_pos,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "left press over row status TipArea hides tip"
+    );
+    hover_pos(slint::LogicalPosition::new(row_pos.x + 1.0, row_pos.y));
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving inside row status after press keeps tip quiet"
+    );
+
+    // Re-enter row status, then wheel scroll hides the tip.
+    let row_pos = hover_el(&ring);
+    assert_eq!(tip_count(), 1, "row status tooltip re-arms after leaving");
+    app.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: row_pos,
+        delta_x: 0.0,
+        delta_y: -30.0,
+    });
+    frame(&app);
+    assert_eq!(tip_count(), 0, "wheel scroll hides shown tooltip");
+
+    // 2. Removing the hovered TipArea under a resting pointer (`if root.item.title != ""` flipping
+    // false, and a full row reset) must not leave a stuck card once the pointer moves or exits,
+    // and returning to the old pixel must not revive it.
+    let row_pos = hover_el(&ring);
+    assert_eq!(tip_count(), 1, "row status tooltip shown before if-flip");
+    let mut no_title = state.clone();
+    no_title.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        title: String::new(),
+        tone: Tone::Info,
+        progress: Some(50.0),
+        ..row("Show - 01.mkv")
+    }]);
+    apply(&app, &no_title);
+    frame(&app);
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(400.0, 300.0),
+    });
+    frame(&app);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(120));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving after conditional TipArea disappears hides the orphaned tooltip within ~100ms"
+    );
+    hover_pos(row_pos);
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving back to the removed TipArea's pixel does not revive the old tooltip"
+    );
+
+    // Same if-flip followed by PointerExited (no move inside the window) also clears the orphaned tip.
+    apply(&app, &state);
+    frame(&app);
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("row status Ring restored");
+    hover_el(&ring);
+    assert_eq!(
+        tip_count(),
+        1,
+        "row status tooltip shown before exit-after-if-flip"
+    );
+    apply(&app, &no_title);
+    frame(&app);
+    app.window().dispatch_event(WindowEvent::PointerExited);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "PointerExited hides an orphaned tooltip after its TipArea disappeared"
+    );
+
+    // Full row reset under a resting pointer also clears on move.
+    apply(&app, &state);
+    frame(&app);
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("row status Ring for reset");
+    let row_pos = hover_el(&ring);
+    assert_eq!(tip_count(), 1, "row status tooltip shown before row reset");
+    let empty_state = ViewState::new(None);
+    apply(&app, &empty_state);
+    frame(&app);
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(400.0, 300.0),
+    });
+    frame(&app);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(120));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving after hovered row disappears hides the orphaned tooltip within ~100ms"
+    );
+    hover_pos(row_pos);
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving back to the removed row's pixel does not revive the old tooltip"
+    );
+
+    // 3. Direct move from tipped control A to tipped control B: stale leave(A) must not kill B.
+    let close = only(&app, "Close window");
+    let min = only(&app, "Minimize window");
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "Close window tip shows");
+    let (mat, msize) = (min.absolute_position(), min.size());
+    hover_pos(slint::LogicalPosition::new(
+        mat.x + msize.width / 2.0,
+        mat.y + msize.height / 2.0,
+    ));
+    assert_eq!(
+        tip_count(),
+        1,
+        "moving directly from Close to Minimize arms Minimize's tip"
+    );
+    assert_eq!(
+        app.global::<Tip>().get_text(),
+        "Minimize",
+        "Tip holds the new control's text"
+    );
+
+    // 4. PointerExited hides a shown tip.
+    app.window().dispatch_event(WindowEvent::PointerExited);
+    frame(&app);
+    assert_eq!(tip_count(), 0, "PointerExited hides shown tooltip");
+
+    // 5. Any key press (window key scope) hides a shown tip.
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before key press");
+    key(&app, Key::Shift);
+    assert_eq!(tip_count(), 0, "key press hides shown tooltip");
+
+    // 6. UI state transitions: sheet open, dialog open, and mode change each hide a shown tip.
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before opening sheet");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    assert_eq!(tip_count(), 0, "opening sheet hides shown tooltip");
+
+    // Left press on a Field label (non-Pressable TipArea wrapping Encoder complexity) hides tip.
+    let cplx_box = only(&app, "Encoder complexity value");
+    let (cat, _) = (cplx_box.absolute_position(), cplx_box.size());
+    let label_pos = slint::LogicalPosition::new(cat.x + 12.0, cat.y - 10.0);
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    hover_pos(label_pos);
+    assert_eq!(tip_count(), 1, "Field label hover shows complexity tooltip");
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: label_pos,
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: label_pos,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "left press over Field label TipArea hides tip"
+    );
+
+    app.invoke_close_sheet();
+    frame(&app);
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before opening dialog");
+    app.invoke_show_dialog();
+    frame(&app);
+    assert_eq!(tip_count(), 0, "opening dialog hides shown tooltip");
+    app.set_dialog_open(false);
+    frame(&app);
+
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before switching mode");
+    app.set_mode(Mode::Extract);
+    frame(&app);
+    assert_eq!(tip_count(), 0, "switching mode hides shown tooltip");
+    app.hide().unwrap();
+}

@@ -63,24 +63,150 @@ export component FocusRing inherits Rectangle {
     border-color: Theme.accent;
 }
 
-// A tooltip's card with plain text: a `Tooltip`'s own `text` is markdown.
+// Window-level hover tooltip state. Rendered by a single TipCard overlay at the top of App
+// instead of Slint 1.19's built-in Tooltip (which wraps custom children in fluent's opaque 18x12
+// ToolTipImpl box and clamps PopupWindow only to that 18x12 size).
+export global Tip {
+    in-out property <string> text;
+    in-out property <length> x;
+    in-out property <length> y;
+    // The pointer position last reported by the active TipArea/Pressable. App compares this
+    // against its window-level pointer watcher so a card can never outlive a removed element.
+    in-out property <length> owner-x;
+    in-out property <length> owner-y;
+    in-out property <int> serial;
+    in-out property <bool> visible;
+
+    public function hover(text: string, x: length, y: length) {
+        if text == "" {
+            self.hide();
+            return;
+        }
+        self.owner-x = x;
+        self.owner-y = y;
+        if self.visible && self.text == text {
+            return;
+        }
+        self.visible = false;
+        self.text = text;
+        self.x = x;
+        self.y = y;
+        self.serial += 1;
+    }
+
+    public function show() {
+        if self.text != "" {
+            self.visible = true;
+        }
+    }
+
+    public function leave(text: string) {
+        if text != "" && self.text == text {
+            self.hide();
+        }
+    }
+
+    public function hide() {
+        self.visible = false;
+        self.text = "";
+    }
+}
+
+// A tooltip's card with plain text: placed 24px below the pointer hotspot (clearing a 24px cursor
+// bounding box, matching GTK's placement below the cursor), horizontally centred on the pointer
+// and clamped inside the window edges, flipping above the cursor only when it would overflow the
+// window's bottom edge.
 export component TipCard inherits Rectangle {
     in property <string> text;
-    // At most 320px wide: a longer text (a run's title with its path) wraps, anywhere in a path.
-    width: min(tip-text.preferred-width + 16px, 320px);
-    height: tip-text.preferred-height + 10px;
+    in property <length> pointer-x;
+    in property <length> pointer-y;
+    in property <length> window-width;
+    in property <length> window-height;
+    property <length> cursor-gap: 24px;
+    property <length> edge-margin: 8px;
+    // At most 440px wide so sentence tips (like complexity's 61 chars, ~364px in GTK) stay on
+    // one line while longer run titles with paths still wrap.
+    property <length> card-width: min(tip-text.preferred-width + 16px, 440px);
+    property <length> card-height: tip-text.preferred-height + 10px;
+    property <length> max-x: max(self.edge-margin, self.window-width - self.edge-margin - self.card-width);
+    property <length> below-y: self.pointer-y + self.cursor-gap;
+
+    x: clamp(self.pointer-x - self.card-width / 2, self.edge-margin, self.max-x);
+    y: self.below-y + self.card-height <= self.window-height
+        ? self.below-y
+        : max(self.edge-margin, self.pointer-y - self.card-height - self.edge-margin);
+    width: self.card-width;
+    height: self.card-height;
     border-radius: 6px;
     background: Theme.float;
     border-width: 1px;
     border-color: Theme.sep;
     tip-text := Text {
         x: 8px;
+        y: 5px;
         width: parent.width - 16px;
         text: root.text;
         color: Theme.fg;
         font-size: 12px;
         wrap: word-wrap;
     }
+}
+
+// Hover tooltip region backed by an enabled TouchArea (`ForwardAndInterceptGrab`, accepts `Moved`,
+// grabs `Pressed`, sets `mouse-cursor`, unlike Slint's internal `TooltipArea` which only observes
+// via `ForwardAndObserve`). Rule: NEVER place a TipArea on top of an interactive control; wrap
+// the control as its parent instead (as Field does), or place it only over non-interactive content.
+export component TipArea inherits TouchArea {
+    in property <string> tip;
+    in property <bool> tip-quiet;
+    property <bool> press-quiet;
+    enabled: root.tip != "";
+
+    public function suppress() {
+        self.press-quiet = true;
+        Tip.hide();
+    }
+
+    function sync-tip() {
+        if self.has-hover && !root.tip-quiet && !self.press-quiet && root.tip != "" {
+            Tip.hover(root.tip, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+        }
+    }
+
+    changed has-hover => {
+        if self.has-hover {
+            self.sync-tip();
+        } else {
+            self.press-quiet = false;
+            Tip.leave(root.tip);
+        }
+    }
+    changed mouse-x => { self.sync-tip(); }
+    changed mouse-y => { self.sync-tip(); }
+    changed tip-quiet => {
+        if root.tip-quiet {
+            Tip.leave(root.tip);
+        }
+    }
+    changed tip => {
+        if self.has-hover {
+            if root.tip == "" {
+                Tip.hide();
+            } else {
+                self.sync-tip();
+            }
+        }
+    }
+    pointer-event(event) => {
+        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+            self.suppress();
+        }
+    }
+    scroll-event(event) => {
+        Tip.hide();
+        reject
+    }
+    @children
 }
 
 // A custom control: a button unless it says otherwise. Its content goes on top of the pointer
@@ -180,14 +306,16 @@ export component Pressable inherits Rectangle {
             reject
         }
     }
-    touch := TouchArea {
+    touch := TipArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? root.cursor : not-allowed;
+        tip: root.tip;
         // A left press takes the focus, as a browser's button does, without a ring.
         pointer-event(event) => {
             if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
                 Focus.keyboard = false;
                 keys.focus();
+                self.suppress();
             }
             root.pointer(event);
         }
@@ -197,17 +325,18 @@ export component Pressable inherits Rectangle {
             }
         }
     }
+    // A disabled TouchArea reports no hover; keep the tooltip and not-allowed cursor (style.css
+    // `button:disabled`) active for disabled buttons (e.g. Run remux before a folder is open).
+    if !root.enabled && root.tip != "": TipArea {
+        tip: root.tip;
+        mouse-cursor: not-allowed;
+    }
     @children
     if root.draws-ring && root.ring: FocusRing {
         gap: root.ring-gap;
         around-width: root.width;
         around-height: root.height;
         radius: root.border-radius;
-    }
-    if root.tip != "": Tooltip {
-        TipCard {
-            text: root.tip;
-        }
     }
 }
 
@@ -299,7 +428,7 @@ export component Slider inherits Rectangle {
     out property <bool> ring: keys.has-focus && Focus.keyboard;
     out property <bool> live: root.enabled && root.layer >= Focus.modal;
     // Latched on a left press until the drag ends and the pointer leaves the slider, so a
-    // wrapping Field's hover Tooltip hides on press and stays hidden like a browser `title`.
+    // wrapping Field's hover tooltip hides on press and stays hidden like a browser `title`.
     out property <bool> tip-quiet: touch.tip-quiet;
     callback changed(value: float);
     callback released(value: float);

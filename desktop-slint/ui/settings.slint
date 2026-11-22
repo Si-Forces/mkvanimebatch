@@ -6,7 +6,7 @@
 import { Button, ScrollView } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { CheckBox, Focus, Pressable, Select, Slider, TextField, TipCard } from "focus.slint";
+import { CheckBox, Focus, Pressable, Select, Slider, TextField, TipArea } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -228,7 +228,7 @@ export component SectionHead inherits Text {
 
 // A labelled field (.field-label): the label, and a "required" tag, over its control. `tip` is
 // the label's `title`: a hover tooltip over the whole field, its control and buttons included, as
-// the webview's `<label>` wraps them. Not a layout itself: a `Tooltip` cannot sit in one.
+// the webview's `<label>` wraps them (via TipArea wrapping the field's layout).
 component Field inherits Rectangle {
     in property <string> label;
     in property <bool> required;
@@ -240,35 +240,33 @@ component Field inherits Rectangle {
     min-width: 0px;
     preferred-width: 0px;
     horizontal-stretch: 1;
-    VerticalLayout {
-        spacing: 4px;
-        HorizontalLayout {
-            spacing: 6px;
-            alignment: start;
-            Text {
-                text: root.label;
-                color: Theme.mute;
-                font-size: 12px;
-                font-weight: 500;
-                line-height-factor: Theme.lh-body;
-                accessible-role: none;
+    TipArea {
+        tip: root.tip;
+        tip-quiet: root.tip-quiet;
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Text {
+                    text: root.label;
+                    color: Theme.mute;
+                    font-size: 12px;
+                    font-weight: 500;
+                    line-height-factor: Theme.lh-body;
+                    accessible-role: none;
+                }
+                if root.required: Text {
+                    text: "REQUIRED";
+                    color: Theme.warn;
+                    font-size: 10px;
+                    font-weight: 600;
+                    letter-spacing: 0.5px;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
             }
-            if root.required: Text {
-                text: "REQUIRED";
-                color: Theme.warn;
-                font-size: 10px;
-                font-weight: 600;
-                letter-spacing: 0.5px;
-                vertical-alignment: center;
-                accessible-role: none;
-            }
-        }
-        @children
-    }
-    // Last, so it is over the field: it watches the pointer and passes every event on.
-    if root.tip != "" && !root.tip-quiet: Tooltip {
-        TipCard {
-            text: root.tip;
+            @children
         }
     }
 }

@@ -3,7 +3,7 @@
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Focus, FocusRing, Pressable, Select, TextField, TipCard } from "focus.slint";
+import { Focus, FocusRing, Pressable, Select, TextField, TipArea } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
 import { SectionHead } from "settings.slint";
 
@@ -144,10 +144,8 @@ component Crumbs inherits Rectangle {
         }
     }
     // The full path on hover, as renderCrumbs sets `title`.
-    if !root.plain && root.label != "": Tooltip {
-        TipCard {
-            text: root.label;
-        }
+    if !root.plain && root.label != "": TipArea {
+        tip: root.label;
     }
 }
 
@@ -521,10 +519,8 @@ export component InspectorPane inherits Rectangle {
                                                     overflow: elide;
                                                     accessible-role: none;
                                                 }
-                                                Tooltip {
-                                                    TipCard {
-                                                        text: rung.detail;
-                                                    }
+                                                TipArea {
+                                                    tip: rung.detail;
                                                 }
                                             }
                                         }

@@ -3,7 +3,7 @@
 // what the controls ask.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Focus, Pressable, TipCard } from "focus.slint";
+import { Focus, Pressable, TipArea } from "focus.slint";
 
 export enum Mode { remux, extract }
 
@@ -477,10 +477,8 @@ component EpRow inherits Rectangle {
                             accessible-role: none;
                         }
                     }
-                    if root.item.title != "": Tooltip {
-                        TipCard {
-                            text: root.item.title;
-                        }
+                    if root.item.title != "": TipArea {
+                        tip: root.item.title;
                     }
                 }
 
@@ -783,10 +781,8 @@ export component QueuePane inherits Rectangle {
                         overflow: elide;
                     }
                 }
-                Tooltip {
-                    TipCard {
-                        text: root.head.crumbs-lead + root.head.crumbs-end;
-                    }
+                TipArea {
+                    tip: root.head.crumbs-lead + root.head.crumbs-end;
                 }
             }
             // .list-tools: the chips, then Select all / None at the end, wrapping in a narrow list.
