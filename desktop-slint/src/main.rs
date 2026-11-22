@@ -163,7 +163,12 @@ fn run(
     );
     run_log::wire(&app, &publisher, run_log::system_clipboard());
     runtime.spawn(run_log::load(&core, &publisher));
-    let send = intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
+    let send = intents::wire(
+        &app,
+        core.clone(),
+        runtime.handle().clone(),
+        publisher.clone(),
+    );
     // Kept until the end: it polls whether the window is minimized.
     let _visibility = watch_window(&app, save, send);
     // A packaged Windows build has no console, so the log file is its only output: say once, in
@@ -177,7 +182,7 @@ fn run(
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {
         if let (Ok(state), Some(app)) = (boot.await, window.upgrade()) {
-            intents::show_boot_mode(&app, &state);
+            intents::apply_boot_state(&app, &publisher, &state);
         }
     })?;
 

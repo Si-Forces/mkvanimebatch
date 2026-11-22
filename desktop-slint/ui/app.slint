@@ -9,13 +9,13 @@ import { Focus, Pressable } from "focus.slint";
 import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone, Spin } from "queue.slint";
-import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
+import { CrumbPart, Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone, Telemetry } from "jobs.slint";
 import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, Focus, Spin, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
+export { Theme, Focus, Spin, FontProbe, CrumbPart, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
 
 // A mode's tab in the sidebar (.task-row): its icon, its name over what it does and its status
 // pill (a dot), then the gear that opens its settings sheet.

@@ -50,7 +50,8 @@ tauri-winres = "0.3"
 # `renderer-software`: headless snapshots for the font test.
 i-slint-backend-testing = { workspace = true, features = ["renderer-software"] }
 tempfile = "3"
-# Sets the system's colour scheme in a test of the Appearance menu's System (no public API does).
+# Sets the system's colour scheme, inspects mouse cursors and walks item trees in ui_tests
+# (no public API does).
 i-slint-core = { workspace = true }
 
 # The FrameStats bench (P2, reused by P7 and the P9 gate): run by hand, never by `cargo test`.

@@ -30,6 +30,12 @@ export struct Rung {
     a11y: string,
 }
 
+// One segment or "›" separator of a path (.crumbs).
+export struct CrumbPart {
+    text: string,
+    sep: bool,
+}
+
 // The Episode Inspector of a mode, as published.
 export struct Inspector {
     // Whether a row is inspected; else the empty text shows.
@@ -39,8 +45,8 @@ export struct Inspector {
     id: string,
     number: string,
     title: string,
-    // The path's crumbs, and the path as one text.
-    crumbs: [string],
+    // The path's crumbs (segments and dimmed separators), and the path as one text.
+    crumbs: [CrumbPart],
     path: string,
     error: string,
     pill-label: string,
@@ -49,7 +55,7 @@ export struct Inspector {
     audio-label: string,
     audio: string,
     // The output folder's crumbs and path, or (`out-plain`) the setting's default as one text.
-    out-crumbs: [string],
+    out-crumbs: [CrumbPart],
     out-path: string,
     out-plain: bool,
     fonts-head: string,
@@ -100,13 +106,13 @@ export component LibraryEntry inherits Pressable {
     }
 }
 
-// A path as crumbs (.crumbs): each crumb but the last followed by "›" (the host's), the last in
+// A path as crumbs (.crumbs): segments separated by "›" at 60% opacity (.crumb-sep), the last in
 // bold. A line breaks between crumbs, as .crumbs's flex-wrap does, and a crumb wider than the
 // line wraps on its own, at a space, else anywhere (overflow-wrap: anywhere), so no part of the
 // path is cut.
-// `plain`: one text in place of a path, not bold. Read as one text, `label`.
+// `plain`: one text in place of a path, not bold and with no hover tooltip. Read as one text, `label`.
 component Crumbs inherits Rectangle {
-    in property <[string]> parts;
+    in property <[CrumbPart]> parts;
     in property <bool> plain;
     in property <string> label;
     // Takes the width it is given and the height its lines need there.
@@ -124,16 +130,23 @@ component Crumbs inherits Rectangle {
         spacing-vertical: 2px;
         for part[i] in root.parts: Text {
             property <bool> last: i == root.parts.length - 1;
-            text: part;
-            color: self.last && !root.plain ? Theme.fg : Theme.path;
+            text: part.text;
+            color: self.last && !root.plain && !part.sep ? Theme.fg : Theme.path;
+            opacity: part.sep ? 0.6 : 1;
             font-size: 12px;
             line-height-factor: Theme.lh-crumbs;
-            font-weight: self.last && !root.plain ? 600 : 400;
+            font-weight: self.last && !root.plain && !part.sep ? 600 : 400;
             wrap: word-wrap;
             // A crumb with no space to break at wraps within the line, not past it.
             min-width: 0px;
             max-width: root.width;
             accessible-role: none;
+        }
+    }
+    // The full path on hover, as renderCrumbs sets `title`.
+    if !root.plain && root.label != "": Tooltip {
+        TipCard {
+            text: root.label;
         }
     }
 }

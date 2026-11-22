@@ -6,7 +6,7 @@
 //! and `index.html` holds the webview's copy of each fixed text named below.
 
 use crate::queue::tone;
-use mkv_anime_batch_slint_ui::{App, Inspector, LibraryItem, Mode, Rung};
+use mkv_anime_batch_slint_ui::{App, CrumbPart, Inspector, LibraryItem, Mode, Rung};
 use mkv_core::request::TrackAssignment;
 use mkv_desktop_core::actor::ModeView;
 use mkv_desktop_core::inspector::{Choice, InspectorView, LadderRung};
@@ -52,8 +52,8 @@ fn joined(crumbs: &[String]) -> SharedString {
     crumbs.join(crate::queue::CRUMB_SEPARATOR).into()
 }
 
-fn model(texts: Vec<SharedString>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(texts))
+fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
+    ModelRc::new(VecModel::from(items))
 }
 
 /// The Library's entries: the input folder first, each with its count.
@@ -81,27 +81,37 @@ pub(crate) fn map_inspector(
     let Some(view) = view else {
         return Inspector::default();
     };
-    // Each crumb but the last followed by "›"; the layout spaces the crumbs.
-    let texts = |crumbs: &[String]| {
-        let last = crumbs.len().saturating_sub(1);
-        let separator = crate::queue::CRUMB_SEPARATOR.trim_end();
-        crumbs
-            .iter()
-            .enumerate()
-            .map(|(at, crumb)| {
-                if at < last {
-                    format!("{crumb}{separator}").into()
-                } else {
-                    SharedString::from(crumb)
-                }
-            })
-            .collect()
+    // Interleave each segment with its own "›" separator so Crumbs can draw separators at 0.6
+    // opacity (.crumbs .crumb-sep) and wrap between flex items.
+    let separator = crate::queue::CRUMB_SEPARATOR.trim();
+    let parts = |crumbs: &[String]| {
+        let mut out = Vec::with_capacity(crumbs.len().saturating_mul(2).saturating_sub(1));
+        for (at, crumb) in crumbs.iter().enumerate() {
+            if at > 0 {
+                out.push(CrumbPart {
+                    text: separator.into(),
+                    sep: true,
+                });
+            }
+            out.push(CrumbPart {
+                text: crumb.as_str().into(),
+                sep: false,
+            });
+        }
+        out
     };
     let (out_crumbs, out_path, out_plain) = match &view.out_crumbs {
-        Some(out) => (texts(out), joined(out), false),
+        Some(out) => (parts(out), joined(out), false),
         None => {
             let default = SharedString::from(default_out(mode));
-            (vec![default.clone()], default, true)
+            (
+                vec![CrumbPart {
+                    text: default.clone(),
+                    sep: false,
+                }],
+                default,
+                true,
+            )
         }
     };
     let assignment = view.assignment.as_ref();
@@ -114,7 +124,7 @@ pub(crate) fn map_inspector(
         id: view.id.as_str().into(),
         number: view.number.as_str().into(),
         title: view.title.as_str().into(),
-        crumbs: model(texts(&view.crumbs)),
+        crumbs: model(parts(&view.crumbs)),
         path: joined(&view.crumbs),
         error: view.error.as_deref().unwrap_or_default().into(),
         pill_label: view.pill.label.as_str().into(),
@@ -473,8 +483,20 @@ mod tests {
             (insp.number.as_str(), insp.title.as_str()),
             ("03", "ep1.mkv")
         );
-        let texts = |model: &ModelRc<SharedString>| model.iter().collect::<Vec<_>>();
-        assert_eq!(texts(&insp.crumbs), ["media ›", "Season 1"]);
+        let parts = |model: &ModelRc<CrumbPart>| {
+            model
+                .iter()
+                .map(|part| (part.text.to_string(), part.sep))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parts(&insp.crumbs),
+            [
+                ("media".into(), false),
+                ("›".into(), true),
+                ("Season 1".into(), false),
+            ]
+        );
         assert_eq!(insp.path, "media › Season 1");
         assert_eq!(insp.error, "");
         assert_eq!(
@@ -488,12 +510,12 @@ mod tests {
         // No output folder: the setting's default, as the field's placeholder says it.
         assert_eq!(
             (
-                texts(&insp.out_crumbs),
+                parts(&insp.out_crumbs),
                 insp.out_path.as_str(),
                 insp.out_plain
             ),
             (
-                vec!["Output folder next to the input".into()],
+                vec![("Output folder next to the input".into(), false)],
                 "Output folder next to the input",
                 true
             )
@@ -515,11 +537,19 @@ mod tests {
         assert_eq!(insp.error, "mkvmerge 2");
         assert_eq!(
             (
-                texts(&insp.out_crumbs),
+                parts(&insp.out_crumbs),
                 insp.out_path.as_str(),
                 insp.out_plain
             ),
-            (vec!["out ›".into(), "Show".into()], "out › Show", false)
+            (
+                vec![
+                    ("out".into(), false),
+                    ("›".into(), true),
+                    ("Show".into(), false),
+                ],
+                "out › Show",
+                false
+            )
         );
         assert!(insp.assigned);
         assert_eq!(insp.asset_path, "Season 1/ep1.ass");

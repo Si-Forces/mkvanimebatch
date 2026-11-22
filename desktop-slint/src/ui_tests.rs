@@ -5650,3 +5650,127 @@ fn status_ring_fills_19px_of_its_20px_box() {
     );
     app.hide().unwrap();
 }
+
+/// The Inspector's episode path and custom output folder draw each `›` separator as its own `Text`
+/// and show the joined path as a hover tooltip; the plain default output folder shows no tooltip.
+#[test]
+fn inspector_crumbs_show_path_tooltips_and_separate_chevron_texts() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let mut view = sample_view();
+    view.crumbs = vec!["media".into(), "Anime".into(), "Season 1".into()];
+    view.out_crumbs = Some(vec!["out".into(), "Show".into()]);
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+    app.show().unwrap();
+
+    let hover = |label: &str| {
+        let element = only(&app, label);
+        let (at, size) = (element.absolute_position(), element.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    };
+    let tips = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+
+    assert_eq!(tips(), 0);
+    hover("media › Anime › Season 1");
+    assert_eq!(tips(), 1, "episode path shows its tooltip on hover");
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "media › Anime › Season 1").count(),
+        2,
+        "Crumbs plus TipCard"
+    );
+
+    hover("out › Show");
+    assert_eq!(tips(), 1, "custom output folder shows its tooltip on hover");
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "out › Show").count(),
+        2
+    );
+
+    // Close the hover tooltip before inspecting the Crumbs subtrees, then assert each Text
+    // directly by its text string and computed opacity (0.6 on "›", 1.0 on segments).
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    {
+        use i_slint_core::accessibility::AccessibleStringProperty;
+        use i_slint_core::item_tree::ItemRc;
+        use i_slint_core::items::{ComplexText, Opacity, SimpleText};
+        use i_slint_core::window::WindowInner;
+
+        fn find_by_label(item: &ItemRc, label: &str) -> Option<ItemRc> {
+            if item
+                .accessible_string_property(AccessibleStringProperty::Label)
+                .as_deref()
+                == Some(label)
+            {
+                return Some(item.clone());
+            }
+            let mut child = item.first_child();
+            while let Some(c) = child {
+                if let Some(found) = find_by_label(&c, label) {
+                    return Some(found);
+                }
+                child = c.next_sibling();
+            }
+            None
+        }
+
+        fn collect_texts(item: &ItemRc, opacity: f32, out: &mut Vec<(String, f32)>) {
+            let opacity = item
+                .downcast::<Opacity>()
+                .map_or(opacity, |op| opacity * op.as_pin_ref().opacity());
+            if let Some(t) = item.downcast::<ComplexText>() {
+                out.push((t.as_pin_ref().text().to_string(), opacity));
+            } else if let Some(t) = item.downcast::<SimpleText>() {
+                out.push((t.as_pin_ref().text().to_string(), opacity));
+            }
+            let mut child = item.first_child();
+            while let Some(c) = child {
+                collect_texts(&c, opacity, out);
+                child = c.next_sibling();
+            }
+        }
+
+        let root = ItemRc::new_root(WindowInner::from_pub(app.window()).component());
+        let parts_of = |label: &str| {
+            let crumbs = find_by_label(&root, label).expect("Crumbs element");
+            let mut out = Vec::new();
+            collect_texts(&crumbs, 1.0, &mut out);
+            out
+        };
+        assert_eq!(
+            parts_of("media › Anime › Season 1"),
+            vec![
+                ("media".into(), 1.0),
+                ("›".into(), 0.6),
+                ("Anime".into(), 1.0),
+                ("›".into(), 0.6),
+                ("Season 1".into(), 1.0),
+            ]
+        );
+        assert_eq!(
+            parts_of("out › Show"),
+            vec![("out".into(), 1.0), ("›".into(), 0.6), ("Show".into(), 1.0)]
+        );
+    }
+
+    // Plain default output folder shows no tooltip on hover.
+    let mut plain_state = ViewState::new(None);
+    let mut plain_view = sample_view();
+    plain_view.out_crumbs = None;
+    plain_state.remux.inspector = Some(plain_view);
+    apply(&app, &plain_state);
+    hover("Output folder next to the input");
+    assert_eq!(tips(), 0, "plain default output folder shows no tooltip");
+    app.hide().unwrap();
+}
