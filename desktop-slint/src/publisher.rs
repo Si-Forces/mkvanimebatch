@@ -10,7 +10,7 @@ use crate::queue::{map_rows, ModeList, RowPatch, Update};
 use crate::run_log::{self, Console, LogPatch};
 use crate::settings::{self, Edits, BITRATES};
 use crate::telemetry;
-use mkv_anime_batch_slint_ui::{App, Focus, Mode, QueueFilter, QueueRow};
+use mkv_anime_batch_slint_ui::{App, Focus, Mode, QueueFilter, QueueRow, Tip};
 use mkv_core::pipeline::PipelineMode;
 use mkv_desktop_core::actor::{Publisher, ViewState};
 use mkv_desktop_core::job::JobDone;
@@ -453,6 +453,8 @@ fn apply(app: &App, mode: Mode, update: Update) {
         // Only remux has the subtitle section; its typed fields are written over the Inspector
         // shown until now, which is set below.
         if let Some(subtitles) = update.subtitles {
+            // A new ladder makes its rungs again: a rung's tooltip would outlive its area.
+            app.global::<Tip>().invoke_hide();
             app.set_sub_ladder(ModelRc::new(VecModel::from(subtitles.ladder)));
             app.set_sub_options(ModelRc::new(VecModel::from(subtitles.options)));
             app.set_sub_values(ModelRc::new(VecModel::from(subtitles.values)));
@@ -484,6 +486,9 @@ fn apply(app: &App, mode: Mode, update: Update) {
                         && rows.iter().any(|row| row.id == id)
                 });
                 let dropped = dropped.is_some();
+                // The rows are made again: a row's tooltip would outlive its area, which Slint
+                // destroys without a leave, until the pointer next moved.
+                app.global::<Tip>().invoke_hide();
                 model.set_vec(rows);
                 app.invoke_unpin(mode);
                 if dropped {

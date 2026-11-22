@@ -181,7 +181,8 @@ component TelItem inherits Rectangle {
     in property <color> tone;
     in property <bool> spark;
     horizontal-stretch: 0;
-    if root.tip != "": TipArea {
+    // Always made, off while `tip` is empty: a tip that empties under the pointer hides its card.
+    TipArea {
         tip: root.tip;
     }
     HorizontalLayout {

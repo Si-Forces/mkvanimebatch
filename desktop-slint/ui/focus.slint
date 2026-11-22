@@ -460,12 +460,12 @@ export component Slider inherits Rectangle {
     function end-drag(commit: bool) {
         if touch.dragging {
             touch.dragging = false;
-            let moved = root.value != touch.drag-start;
-            touch.drag-start = root.value;
             if !touch.has-hover {
                 touch.tip-quiet = false;
             }
-            if commit && moved {
+            // Only a pointer step counts: a form publication that moves the value while the
+            // pointer is held is not the user's edit.
+            if commit && touch.stepped {
                 root.released(root.value);
             }
         }
@@ -619,7 +619,8 @@ export component Slider inherits Rectangle {
         // style.css sets cursor: pointer on buttons only, not input[type="range"].
         mouse-cursor: root.enabled ? MouseCursor.default : not-allowed;
         property <bool> dragging;
-        property <float> drag-start;
+        // A pointer step of this drag changed the value.
+        property <bool> stepped;
         out property <bool> tip-quiet;
         changed has-hover => {
             if !self.has-hover && !self.dragging {
@@ -642,15 +643,14 @@ export component Slider inherits Rectangle {
                 keys.focus();
                 self.tip-quiet = true;
                 self.dragging = true;
-                self.drag-start = root.value;
-                root.set-stepped(root.value-at(self.mouse-x));
+                self.stepped = root.set-stepped(root.value-at(self.mouse-x));
             } else if event.kind == PointerEventKind.up {
                 root.end-drag(true);
             }
         }
         moved => {
-            if self.dragging && root.live {
-                root.set-stepped(root.value-at(self.mouse-x));
+            if self.dragging && root.live && root.set-stepped(root.value-at(self.mouse-x)) {
+                self.stepped = true;
             }
         }
     }

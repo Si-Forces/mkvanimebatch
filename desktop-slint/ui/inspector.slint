@@ -144,8 +144,9 @@ component Crumbs inherits Rectangle {
         }
     }
     // The full path on hover, as renderCrumbs sets `title`.
-    if !root.plain && root.label != "": TipArea {
-        tip: root.label;
+    // Always made, off while there is no path (plain): a tip that empties hides its card.
+    TipArea {
+        tip: root.plain ? "" : root.label;
     }
 }
 

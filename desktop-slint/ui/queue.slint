@@ -477,7 +477,9 @@ component EpRow inherits Rectangle {
                             accessible-role: none;
                         }
                     }
-                    if root.item.title != "": TipArea {
+                    // Always made, off while the title is empty: a title that empties under the
+                    // pointer hides its card (an `if` would destroy the area and leave it shown).
+                    TipArea {
                         tip: root.item.title;
                     }
                 }

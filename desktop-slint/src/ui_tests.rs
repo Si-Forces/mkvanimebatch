@@ -5466,6 +5466,30 @@ fn custom_complexity_slider_handles_keys_drag_and_accessibility() {
         "pointer click at current value must not commit"
     );
 
+    // A form publication that moves the value while the pointer is held is not the user's edit:
+    // the release commits nothing (only a pointer step of the drag counts).
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    let kept = app.get_remux_form();
+    let mut form = kept.clone();
+    form.complexity = "7".into();
+    app.set_remux_form(form);
+    frame(&app);
+    assert_eq!(slider.accessible_value().as_deref(), Some("7"));
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        10,
+        "a publication during a held press must not commit"
+    );
+    app.set_remux_form(kept);
+    frame(&app);
+
     // Interrupted drag (PointerExited sends Cancel with button == Other): ends drag once,
     // commits once, and subsequent moves no longer drag.
     app.window().dispatch_event(WindowEvent::PointerPressed {
@@ -6200,5 +6224,78 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
     app.set_mode(Mode::Extract);
     frame(&app);
     assert_eq!(tip_count(), 0, "switching mode hides shown tooltip");
+    app.hide().unwrap();
+}
+
+/// A tooltip goes with its area even when the pointer does not move: a title that empties under
+/// it (the area stays, off) and a row reset (the area is destroyed) both hide the card at once.
+#[test]
+fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    // Each publication a newer one: the publisher drops a state no newer than the last.
+    let seq = std::cell::Cell::new(0);
+    let titled_row = |name: &str, title: &str| {
+        let mut state = ViewState::new(None);
+        seq.set(seq.get() + 1);
+        state.seq = seq.get();
+        state.remux.rows = Arc::new(vec![Row {
+            status: ItemStatus::Processing,
+            label: "Processing".into(),
+            title: title.into(),
+            tone: Tone::Info,
+            progress: Some(50.0),
+            ..row(name)
+        }]);
+        state.remux.empty = None;
+        state
+    };
+    let titled = |title: &str| titled_row("Show - 01.mkv", title);
+    // One publisher throughout, so a changed title is a row patch in place and another episode's
+    // row a reset, as in the app.
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&titled("Encoding audio track"));
+    app.show().unwrap();
+    frame(&app);
+    let tip_count = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+    let show_tip = || {
+        let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+            .next()
+            .expect("row status Ring");
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (ring.absolute_position(), ring.size());
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+        assert_eq!(tip_count(), 1, "the row status tooltip shows on hover");
+    };
+
+    show_tip();
+    publisher.show(&titled(""));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "a title emptied under a resting pointer hides the card"
+    );
+
+    publisher.show(&titled("Encoding audio track"));
+    frame(&app);
+    show_tip();
+    // Another episode's row: the model is replaced (`RowPatch::Reset`), destroying the area.
+    publisher.show(&titled_row("Show - 02.mkv", "Encoding audio track"));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "a row reset under a resting pointer hides the card"
+    );
     app.hide().unwrap();
 }
