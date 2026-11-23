@@ -115,6 +115,7 @@ component Crumbs inherits Rectangle {
     in property <[CrumbPart]> parts;
     in property <bool> plain;
     in property <string> label;
+    in property <string> owner;
     // Takes the width it is given and the height its lines need there.
     min-width: 0px;
     preferred-width: 0px;
@@ -147,6 +148,7 @@ component Crumbs inherits Rectangle {
     // Always made, off while there is no path (plain): a tip that empties hides its card.
     TipArea {
         tip: root.plain ? "" : root.label;
+        owner: root.owner;
     }
 }
 
@@ -221,6 +223,7 @@ component CommitEdit inherits TextField {
 
 // The Episode Inspector (.insp): the inspected row's header, then its sections, which scroll.
 export component InspectorPane inherits Rectangle {
+    in property <string> name;
     in property <Inspector> insp;
     in property <[Rung]> ladder;
     // The assignment select's entries, "Choose a file…" last.
@@ -317,6 +320,7 @@ export component InspectorPane inherits Rectangle {
                 if root.insp.crumbs.length > 0: Crumbs {
                     parts: root.insp.crumbs;
                     label: root.insp.path;
+                    owner: "crumbs:" + root.name;
                 }
             }
         }
@@ -444,6 +448,7 @@ export component InspectorPane inherits Rectangle {
                                 parts: root.insp.out-crumbs;
                                 plain: root.insp.out-plain;
                                 label: root.insp.out-path;
+                                owner: "out-crumbs:" + root.name;
                             }
                         }
                     }

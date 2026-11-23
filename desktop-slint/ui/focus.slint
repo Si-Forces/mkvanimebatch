@@ -76,9 +76,19 @@ export global Tip {
     in-out property <length> owner-y;
     in-out property <int> serial;
     in-out property <bool> visible;
-    // Which area shows it (`TipArea.owner`, "" for an unnamed one): the host hides the card of an
-    // area a publication removes, and no other.
+    // Which area shows it (`TipArea.owner`, "" for an unnamed one): `status:<mode>:<row id>`,
+    // `rung`, `crumbs:<mode>`, `out-crumbs:<mode>`, `head-crumbs:<mode>`, or `library:<mode>`.
+    // The host hides the card of an area a publication removes, and no other.
     in-out property <string> owner;
+    // Bumped on any mouse press by the host's winit window event filter (`main.rs`
+    // `watch_window`, the single production source) so every hovered TipArea latches
+    // `press-quiet` until the pointer leaves it.
+    in-out property <int> press-serial;
+
+    public function pressed() {
+        self.press-serial += 1;
+        self.hide();
+    }
 
     public function hover(text: string, owner: string, x: length, y: length) {
         if text == "" {
@@ -165,8 +175,8 @@ export component TipArea inherits TouchArea {
     in property <string> tip;
     // Names the area for the host (`Tip.owner`): set where a publication can remove it.
     in property <string> owner;
-    in property <bool> tip-quiet;
     property <bool> press-quiet;
+    property <int> press-serial: Tip.press-serial;
     enabled: root.tip != "";
 
     public function suppress() {
@@ -175,11 +185,16 @@ export component TipArea inherits TouchArea {
     }
 
     function sync-tip() {
-        if self.has-hover && !root.tip-quiet && !self.press-quiet && root.tip != "" {
+        if self.has-hover && !self.press-quiet && root.tip != "" {
             Tip.hover(root.tip, root.owner, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
         }
     }
 
+    changed press-serial => {
+        if self.has-hover {
+            self.press-quiet = true;
+        }
+    }
     changed has-hover => {
         if self.has-hover {
             self.sync-tip();
@@ -190,11 +205,6 @@ export component TipArea inherits TouchArea {
     }
     changed mouse-x => { self.sync-tip(); }
     changed mouse-y => { self.sync-tip(); }
-    changed tip-quiet => {
-        if root.tip-quiet {
-            Tip.leave(root.tip);
-        }
-    }
     changed tip => {
         if self.has-hover {
             if root.tip == "" {
@@ -222,6 +232,8 @@ export component Pressable inherits Rectangle {
     in property <bool> enabled: true;
     // The hover tooltip (index.html's `title`), also the accessible description; none when empty.
     in property <string> tip;
+    // Names the tooltip area for the host (`Tip.owner`) where a publication can remove it.
+    in property <string> tip-owner;
     // Names the control for `Focus.restore`: its accessible label unless set; empty for never.
     in property <string> focus-key: self.accessible-label;
     // The ring's distance from the control (outline-offset).
@@ -317,6 +329,7 @@ export component Pressable inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? root.cursor : not-allowed;
         tip: root.tip;
+        owner: root.tip-owner;
         // A left press takes the focus, as a browser's button does, without a ring.
         pointer-event(event) => {
             if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
@@ -337,6 +350,7 @@ export component Pressable inherits Rectangle {
     // Always made, off while enabled: a button enabled under a resting pointer hides the card.
     TipArea {
         tip: root.enabled ? "" : root.tip;
+        owner: root.tip-owner;
         mouse-cursor: not-allowed;
     }
     @children
@@ -435,9 +449,6 @@ export component Slider inherits Rectangle {
     out property <bool> has-focus: keys.has-focus;
     out property <bool> ring: keys.has-focus && Focus.keyboard;
     out property <bool> live: root.enabled && root.layer >= Focus.modal;
-    // Latched on a left press until the drag ends and the pointer leaves the slider, so a
-    // wrapping Field's hover tooltip hides on press and stays hidden like a browser `title`.
-    out property <bool> tip-quiet: touch.tip-quiet;
     callback changed(value: float);
     callback released(value: float);
 
@@ -468,9 +479,6 @@ export component Slider inherits Rectangle {
     function end-drag(commit: bool) {
         if touch.dragging {
             touch.dragging = false;
-            if !touch.has-hover {
-                touch.tip-quiet = false;
-            }
             // Only a pointer step counts: a form publication that moves the value while the
             // pointer is held is not the user's edit.
             if commit && touch.stepped {
@@ -631,12 +639,6 @@ export component Slider inherits Rectangle {
         property <bool> stepped;
         // Where the pointer was last sampled: a release elsewhere (a touch) is a last step.
         property <length> sampled-x;
-        out property <bool> tip-quiet;
-        changed has-hover => {
-            if !self.has-hover && !self.dragging {
-                self.tip-quiet = false;
-            }
-        }
         pointer-event(event) => {
             // PointerEventKind.cancel arrives with button == other, so handle it before the
             // live/button filter; commit once only while still live (locking mid-drag ends
@@ -651,7 +653,6 @@ export component Slider inherits Rectangle {
             if event.kind == PointerEventKind.down {
                 Focus.keyboard = false;
                 keys.focus();
-                self.tip-quiet = true;
                 self.dragging = true;
                 self.sampled-x = self.mouse-x;
                 self.stepped = root.set-stepped(root.value-at(self.mouse-x));

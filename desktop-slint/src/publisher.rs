@@ -442,7 +442,9 @@ fn focused_row(current: &str, mode: Mode) -> Option<&str> {
 /// Hides the hover tooltip when `removed` names its area (`Tip.owner`): Slint destroys an area
 /// without a leave, so its card would stay under a resting pointer. An owner is
 /// `status:<mode>:<row id>` (a row's status, `status_prefix` and the id), `rung` (a subtitle
-/// rung) or "" (an area no publication removes).
+/// rung), `crumbs:<mode>` (the Inspector's path), `out-crumbs:<mode>` (the Inspector's output
+/// folder), `head-crumbs:<mode>` (the queue header's path), `library:<mode>` (a Library entry),
+/// or "" (an area no publication removes).
 fn hide_tip_of(app: &App, removed: impl Fn(&str) -> bool) {
     let tip = app.global::<Tip>();
     if removed(&tip.get_owner()) {
@@ -468,9 +470,19 @@ fn apply(app: &App, mode: Mode, update: Update) {
     if let Some(new) = update.head.filter(|new| *new != head) {
         // The card's button goes with its action (Open folder…, then the Scanning card).
         let button_gone = !new.card_shown || new.card_action.is_empty();
+        let head_crumbs_gone = new.crumbs_end.is_empty();
+        let card_shown = new.card_shown;
         match mode {
             Mode::Remux => app.set_remux_head(new),
             Mode::Extract => app.set_extract_head(new),
+        }
+        if head_crumbs_gone {
+            let owner = format!("head-crumbs:{}", name(mode));
+            hide_tip_of(app, |current| current == owner);
+        }
+        if card_shown {
+            let prefix = status_prefix(mode);
+            hide_tip_of(app, |current| current.starts_with(&prefix));
         }
         if button_gone
             && app.global::<Focus>().get_current() == format!("{}:open-folder", name(mode))
@@ -487,12 +499,14 @@ fn apply(app: &App, mode: Mode, update: Update) {
             Mode::Remux => app.set_remux_library(items),
             Mode::Extract => app.set_extract_library(items),
         });
-        // app.slint shows the Library of `mode` only.
-        if replaced
-            && app.get_mode() == mode
-            && app.global::<Focus>().get_current().starts_with("library:")
-        {
-            app.invoke_focus_keys();
+        if replaced {
+            let owner = format!("library:{}", name(mode));
+            hide_tip_of(app, |current| current == owner);
+            // app.slint shows the Library of `mode` only.
+            if app.get_mode() == mode && app.global::<Focus>().get_current().starts_with("library:")
+            {
+                app.invoke_focus_keys();
+            }
         }
     }
     if let Some(update) = update.inspector {
@@ -512,6 +526,16 @@ fn apply(app: &App, mode: Mode, update: Update) {
         if mode == Mode::Remux && !inspector.shown {
             app.set_sub_dirty(false);
             hide_tip_of(app, |owner| owner == "rung");
+        }
+        // Hide Inspector crumb tips only when their area goes (`!shown` drops both; empty `crumbs`
+        // drops the path area). A content change on a surviving area is handled by `changed tip`.
+        if !inspector.shown {
+            let crumbs = format!("crumbs:{}", name(mode));
+            let out_crumbs = format!("out-crumbs:{}", name(mode));
+            hide_tip_of(app, |current| current == crumbs || current == out_crumbs);
+        } else if inspector.crumbs.row_count() == 0 {
+            let crumbs = format!("crumbs:{}", name(mode));
+            hide_tip_of(app, |current| current == crumbs);
         }
         match mode {
             Mode::Remux => app.set_remux_inspector(inspector),

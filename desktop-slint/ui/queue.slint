@@ -786,6 +786,7 @@ export component QueuePane inherits Rectangle {
                 }
                 TipArea {
                     tip: root.head.crumbs-lead + root.head.crumbs-end;
+                    owner: "head-crumbs:" + root.name;
                 }
             }
             // .list-tools: the chips, then Select all / None at the end, wrapping in a narrow list.
