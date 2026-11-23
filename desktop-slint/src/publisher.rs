@@ -476,9 +476,11 @@ fn apply(app: &App, mode: Mode, update: Update) {
             app.set_sub_values(ModelRc::new(VecModel::from(subtitles.values)));
             write_form(app, &app.get_remux_inspector(), &inspector);
         }
-        // No episode inspected: nothing typed is left to commit.
+        // No episode inspected: nothing typed is left to commit, and the ladder goes with the
+        // Inspector (no new one is staged), a hovered rung's card with it.
         if mode == Mode::Remux && !inspector.shown {
             app.set_sub_dirty(false);
+            hide_tip_of(app, |owner| owner == "rung");
         }
         match mode {
             Mode::Remux => app.set_remux_inspector(inspector),

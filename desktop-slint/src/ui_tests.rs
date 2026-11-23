@@ -6268,6 +6268,51 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
 /// it (the area stays, off), a row reset or a row patched hidden (the area is destroyed), a
 /// disabled button enabled and the bar's chips going under 900px all hide the card at once; a
 /// removal hides only its own area's card (`Tip.owner`), so another control's card, another row's
+/// A hovered subtitle rung's card goes with the Inspector when a publication shows none (a scan
+/// that leaves no episodes stages no new ladder), with the pointer still.
+#[test]
+fn a_rung_tooltip_hides_when_the_inspector_goes() {
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(1100.0, 800.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Season 1/ep1.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    let tip = app.global::<crate::Tip>();
+    let shown = ElementHandle::find_by_element_type_name(&app, "TipArea").any(|area| {
+        let (at, size) = (area.absolute_position(), area.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+        tip.get_owner() == "rung" && tip.get_visible()
+    });
+    assert!(shown, "a found rung shows its detail on hover");
+
+    state.seq += 1;
+    state.remux.rows = Arc::new(Vec::new());
+    state.remux.inspector = None;
+    publisher.show(&state);
+    frame(&app);
+    assert!(
+        !tip.get_visible() && tip.get_owner().is_empty(),
+        "the Inspector gone under a resting pointer hides the rung's card"
+    );
+    app.hide().unwrap();
+}
+
 /// with the same title, and one over the other mode's update survive.
 #[test]
 fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
