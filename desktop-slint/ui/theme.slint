@@ -66,8 +66,12 @@ export global Theme {
 
     out property <length> window-radius: 14px;
     out property <length> pane-radius: 22px;
-    // GlassPane's shadow blur; app.slint draws one at this blur from the first frame (a pre-warm).
-    out property <length> pane-shadow-blur: 40px;
+    // style.css `button:disabled, input:disabled, select:disabled { opacity: .75 }`.
+    out property <float> disabled-opacity: 0.75;
+    // GlassPane's shadow blur and offset (style.css --shadow); app.slint draws pre-warms at both blurs.
+    out property <length> pane-shadow-blur: dark ? 40px : 32px;
+    out property <length> pane-shadow-y: dark ? 14px : 12px;
+    out property <length> pane-shadow-near-blur: 3px;
 
     // The wallpaper (--wall): three radial gradients over a base.
     out property <color> wall-a: dark ? #1c3d57 : #bfe3ff;
@@ -103,8 +107,12 @@ export global Theme {
     // .glass::before's top highlight, fading out at 38% of the pane. AA: dark at 10% where
     // style.css has 22%, which leaves mute at 4.2:1 on the dark float under it.
     out property <color> glass-hi: dark ? #ffffff1a : #ffffff38;
-    // The first of --shadow's two layers.
+    // --shadow's two layers: the far soft shadow and the near 1px/3px shadow.
     out property <color> shadow: dark ? #00000080 : #1e2a4024;
+    out property <color> shadow-near: dark ? #0000004d : #1e2a4014;
+    // .cap's drop shadow (0 2px 8px rgba(0,0,0,.14)) and top highlight (inset 0 1px 0 rgba(255,255,255,.4)).
+    out property <color> cap-shadow: #00000024;
+    out property <color> cap-hi: #ffffff66;
 
     // Text and lines.
     out property <color> fg: dark ? #e8edf2 : #121820;
@@ -154,27 +162,70 @@ export component GlassPane inherits Rectangle {
     out property <length> blur: Theme.glass ? Theme.glass-blur : 0px;
     // Over the modal dimmer (the sheet and the dialog card): the thicker glass-float-dim.
     in property <bool> dimmed;
+    // Clips `@children` to `border-radius` without clipping the inner shadow below.
+    in property <bool> clip-content;
+    property <color> fill: !Theme.glass ? Theme.float : self.dimmed ? Theme.glass-float-dim : Theme.glass-float;
+    property <float> fill-alpha: self.fill.alpha / 255.0;
+    // Split the translucent fill across outer (far shadow) and inner (1px/3px near shadow) so
+    // their composite alpha equals `fill-alpha` (1 - (1 - outer) * (1 - inner) == fill-alpha)
+    // while both rectangles cast drop shadows. Both Skia (`SrcIn`) and the software renderer
+    // weight a drop shadow by its casting rectangle's fill alpha, so setting `outer-alpha` to
+    // `Theme.shadow.alpha / 255` keeps the far shadow unattenuated while maximising `inner-alpha`
+    // (minimising near-shadow bleed under the translucent fill), and both shadow colours divide
+    // by their casting layer's alpha.
+    property <float> outer-alpha: self.fill-alpha >= 1.0 ? 1.0
+        : max(0.01, min(self.fill-alpha, Theme.shadow.alpha / 255.0));
+    property <float> inner-alpha: self.fill-alpha >= 1.0 ? 1.0
+        : max(0.01, (self.fill-alpha - self.outer-alpha) / (1.0 - self.outer-alpha));
     border-radius: Theme.pane-radius;
     backdrop-blur: self.blur;
-    background: !Theme.glass ? Theme.float : self.dimmed ? Theme.glass-float-dim : Theme.glass-float;
-    border-width: 1px;
-    border-color: Theme.edge;
+    background: self.fill.with-alpha(self.outer-alpha);
     drop-shadow-blur: Theme.pane-shadow-blur;
-    drop-shadow-offset-y: 18px;
-    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: Theme.pane-shadow-y;
+    drop-shadow-color: Theme.shadow.with-alpha(min(1.0, (Theme.shadow.alpha / 255.0) / self.outer-alpha));
+
+    // Near layer of --shadow (0 1px 3px), fill-only so the 1px rim does not alter the shadow mask.
+    Rectangle {
+        border-radius: parent.border-radius;
+        background: root.fill.with-alpha(root.inner-alpha);
+        drop-shadow-blur: Theme.pane-shadow-near-blur;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: Theme.shadow-near.with-alpha(min(1.0, (Theme.shadow-near.alpha / 255.0) / root.inner-alpha));
+    }
+    // The pane's 1px rim.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 1px;
+        border-color: Theme.edge;
+    }
     Rectangle {
         y: 0;
         height: parent.height * 0.38;
         border-radius: parent.border-radius;
         background: @linear-gradient(180deg, Theme.glass-hi 0%, Theme.glass-hi.transparentize(100%) 100%);
     }
-    // The inset line, between the top corners.
+    // .glass's `inset 0 1px 0 var(--hi)` curved top highlight inside the 1px rim (drawn with a
+    // clipped shifted border rather than inner-shadow-*, which Slint 1.19's software renderer skips).
     Rectangle {
-        x: parent.border-radius;
+        x: 1px;
         y: 1px;
-        width: parent.width - 2 * parent.border-radius;
-        height: 1px;
-        background: Theme.hi;
+        width: max(0px, parent.width - 2px);
+        height: max(0px, parent.height - 2px);
+        border-radius: max(0px, parent.border-radius - 1px);
+        clip: true;
+        Rectangle {
+            x: -1px;
+            y: 0px;
+            width: parent.width + 2px;
+            height: parent.height + 2px;
+            border-radius: parent.border-radius + 1px;
+            border-width: 1px;
+            border-color: Theme.hi;
+        }
     }
-    @children
+    Rectangle {
+        border-radius: parent.border-radius;
+        clip: root.clip-content;
+        @children
+    }
 }

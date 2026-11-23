@@ -9,7 +9,7 @@ use crate::inspector::{capped_tag, restore_form, typed_fields, SUBTITLE_FILTER};
 use crate::publisher::SlintPublisher;
 use mkv_anime_batch_slint_ui::{App, Mode};
 use mkv_core::pipeline::PipelineMode;
-use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
+use mkv_desktop_core::actor::{CoreHandle, Intent, Publisher, ViewState};
 use mkv_desktop_core::queue::Direction;
 use slint::{ComponentHandle, Model, SharedString};
 use std::collections::VecDeque;
@@ -34,6 +34,14 @@ pub(crate) fn show_boot_mode(app: &App, state: &ViewState) {
     if extract {
         app.set_mode(Mode::Extract);
     }
+}
+
+/// Applies the initial View State read from `core.state()` at boot: switches to extract if a
+/// start or job already holds it, and pushes the state through `publisher` (whose `seq` guard
+/// drops it if a state as new or newer already arrived).
+pub(crate) fn apply_boot_state(app: &App, publisher: &SlintPublisher, state: &ViewState) {
+    show_boot_mode(app, state);
+    publisher.state(state);
 }
 
 /// What runs once an Intent is answered, kept while the Intent waits behind a clear.
@@ -765,5 +773,35 @@ pub(crate) mod tests {
         state.run.mode = Some(PipelineMode::Extract);
         show_boot_mode(&app, &state);
         assert_eq!(app.get_mode(), Mode::Extract);
+    }
+
+    #[test]
+    fn boot_state_is_pushed_through_the_publisher_and_drops_stale_seq() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = App::new().unwrap();
+        crate::publisher::install_models(&app);
+        let publisher = SlintPublisher::new(&app);
+
+        // Before any publication arrives, the boot state reaches the window.
+        let mut boot = ViewState::new(None);
+        boot.seq = 0;
+        boot.remux.title = "Boot title".into();
+        apply_boot_state(&app, &publisher, &boot);
+        publisher.flush();
+        assert_eq!(app.get_remux_head().title, "Boot title");
+
+        // Once a newer publication has landed, a stale boot state is dropped by the seq guard.
+        let mut newer = ViewState::new(None);
+        newer.seq = 2;
+        newer.remux.title = "Newer title".into();
+        publisher.show(&newer);
+        assert_eq!(app.get_remux_head().title, "Newer title");
+
+        let mut stale = ViewState::new(None);
+        stale.seq = 1;
+        stale.remux.title = "Stale title".into();
+        apply_boot_state(&app, &publisher, &stale);
+        publisher.flush();
+        assert_eq!(app.get_remux_head().title, "Newer title");
     }
 }

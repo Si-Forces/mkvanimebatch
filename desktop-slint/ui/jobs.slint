@@ -2,7 +2,7 @@
 // .pill-btn, .stack, .status-pill, .modal-card). Layout and bindings only: the host
 // (desktop-slint/src/jobs.rs) maps every text, count, width and tone from the published controls.
 import { GlassPane, Theme } from "theme.slint";
-import { Pressable, TipCard } from "focus.slint";
+import { Pressable, Tip, TipArea } from "focus.slint";
 
 // The status pill's style (presentation.rs `StatusPill::class`).
 export enum StatusTone { idle, running, success, error, cancelled }
@@ -60,9 +60,27 @@ export component CapButton inherits Pressable {
     width: row.preferred-width + 36px;
     height: 36px;
     border-radius: self.height / 2;
-    background: self.hovered && self.enabled ? fill.darker(10%) : fill;
-    opacity: self.enabled ? 1 : 0.75;
+    background: fill;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.cap-shadow;
     accessible-label: text;
+    // .cap's inset 0 1px 0 rgba(255,255,255,.4) top crescent (drawn with a clipped shifted border
+    // rather than inner-shadow-*, which Slint 1.19's software renderer skips).
+    Rectangle {
+        border-radius: parent.border-radius;
+        clip: true;
+        Rectangle {
+            x: -1px;
+            y: 0px;
+            width: parent.width + 2px;
+            height: parent.height + 2px;
+            border-radius: parent.border-radius + 1px;
+            border-width: 1px;
+            border-color: Theme.cap-hi;
+        }
+    }
     row := HorizontalLayout {
         alignment: center;
         spacing: 8px;
@@ -99,8 +117,8 @@ export component PillButton inherits Pressable {
     width: label.preferred-width + 30px;
     height: 36px;
     border-radius: self.height / 2;
-    background: self.hovered && self.enabled ? Theme.hover : Theme.field;
-    opacity: self.enabled ? 1 : 0.75;
+    background: Theme.field;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     border-width: 1px;
     border-color: Theme.edge;
     accessible-label: text;
@@ -163,10 +181,9 @@ component TelItem inherits Rectangle {
     in property <color> tone;
     in property <bool> spark;
     horizontal-stretch: 0;
-    if root.tip != "": Tooltip {
-        TipCard {
-            text: root.tip;
-        }
+    // Always made, off while `tip` is empty: a tip that empties under the pointer hides its card.
+    TipArea {
+        tip: root.tip;
     }
     HorizontalLayout {
         spacing: 8px;
@@ -226,6 +243,13 @@ export component BottomBar inherits Rectangle {
         }
     }
     property <bool> wide: root.width >= 900px;
+    property <string> chips-tip: "Workers and disk I/O jobs: the engine's defaults, or the running batch's own";
+    // The chips go under a resting pointer too (a window snapped narrower): their card with them.
+    changed wide => {
+        if !self.wide {
+            Tip.leave(self.chips-tip);
+        }
+    }
     height: bar.preferred-height;
     background: Theme.side;
     Rectangle {
@@ -288,7 +312,7 @@ export component BottomBar inherits Rectangle {
         }
         // .bar-chips: hidden under 900px.
         if root.wide: chip-block := Rectangle {
-            property <string> tip: "Workers and disk I/O jobs: the engine's defaults, or the running batch's own";
+            property <string> tip: root.chips-tip;
             width: chips.preferred-width;
             accessible-role: groupbox;
             accessible-description: self.tip;
@@ -307,10 +331,8 @@ export component BottomBar inherits Rectangle {
                     line-height-factor: Theme.lh-body;
                 }
             }
-            Tooltip {
-                TipCard {
-                    text: chip-block.tip;
-                }
+            TipArea {
+                tip: chip-block.tip;
             }
         }
         // .tel: the sparklines show from 1100px.

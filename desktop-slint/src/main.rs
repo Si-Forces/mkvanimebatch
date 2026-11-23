@@ -18,7 +18,7 @@ mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::{App, Focus};
+use mkv_anime_batch_slint_ui::{App, Focus, Tip};
 use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
@@ -163,7 +163,12 @@ fn run(
     );
     run_log::wire(&app, &publisher, run_log::system_clipboard());
     runtime.spawn(run_log::load(&core, &publisher));
-    let send = intents::wire(&app, core.clone(), runtime.handle().clone(), publisher);
+    let send = intents::wire(
+        &app,
+        core.clone(),
+        runtime.handle().clone(),
+        publisher.clone(),
+    );
     // Kept until the end: it polls whether the window is minimized.
     let _visibility = watch_window(&app, save, send);
     // A packaged Windows build has no console, so the log file is its only output: say once, in
@@ -177,7 +182,7 @@ fn run(
     let (window, boot) = (app.as_weak(), core.state());
     slint::spawn_local(async move {
         if let (Ok(state), Some(app)) = (boot.await, window.upgrade()) {
-            intents::show_boot_mode(&app, &state);
+            intents::apply_boot_state(&app, &publisher, &state);
         }
     })?;
 
@@ -323,17 +328,31 @@ fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Tim
     let mut pending = save;
     let pressed = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
-        // Any left press, on a fluent widget or a blank area too, hides the ring until a key
-        // (`Focus.keyboard`, :focus-visible); a Pressable's own press clears it as well.
-        if let WindowEvent::MouseInput {
-            state: ElementState::Pressed,
-            button: MouseButton::Left,
-            ..
-        } = event
-        {
-            if let Some(app) = pressed.upgrade() {
-                app.global::<Focus>().set_keyboard(false);
+        // Any press, on a fluent widget or a blank area too, dismisses any hover tooltip like a
+        // browser (a right press opens a field's context menu), as do the pointer leaving, a
+        // wheel and the window losing the focus. A left press also hides the ring until a key
+        // (`Focus.keyboard`, :focus-visible).
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                if let Some(app) = pressed.upgrade() {
+                    if *button == MouseButton::Left {
+                        app.global::<Focus>().set_keyboard(false);
+                    }
+                    app.global::<Tip>().invoke_hide();
+                }
             }
+            WindowEvent::CursorLeft { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Focused(false) => {
+                if let Some(app) = pressed.upgrade() {
+                    app.global::<Tip>().invoke_hide();
+                }
+            }
+            _ => {}
         }
         // The borrow ends before `told` sends.
         let change = seen.borrow_mut().event(event);

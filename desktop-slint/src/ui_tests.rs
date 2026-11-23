@@ -14,6 +14,16 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Installs Slint's software-renderer testing backend on the current test thread.
+fn init_software_renderer() {
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+}
+
 /// A window with its row models, as `main` builds it.
 fn new_app() -> App {
     let app = App::new().unwrap();
@@ -75,6 +85,17 @@ fn traffic_light_gap(app: &App) -> slint::LogicalPosition {
     let light = only(app, "Close window");
     let (at, size) = (light.absolute_position(), light.size());
     slint::LogicalPosition::new(at.x + size.width + 4.0, at.y + size.height / 2.0)
+}
+
+/// The mouse cursor the window shows now.
+fn mouse_cursor(app: &App) -> i_slint_core::cursor::MouseCursorInner {
+    use i_slint_backend_testing::testing_backend::TestingWindow;
+    let adapter = i_slint_core::window::WindowInner::from_pub(app.window()).window_adapter();
+    let window = adapter
+        .internal(i_slint_core::InternalToken)
+        .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
+        .expect("TestingWindow");
+    window.mouse_cursor()
 }
 
 /// The pointer moved to `at`, and the fades given time to end.
@@ -1120,6 +1141,109 @@ fn the_number_fields_and_the_complexity_show_their_tooltips_on_hover() {
         only(&app, "Encoder complexity value").accessible_description(),
         Some(limits.complexity_tip.clone())
     );
+    app.hide().unwrap();
+}
+
+/// Pressing the complexity slider hides the wrapping Field's tooltip immediately (so it does not
+/// cover the track while dragging) and keeps it hidden after release until the pointer leaves and
+/// returns, matching a browser's `title` tooltip.
+#[test]
+fn complexity_slider_press_hides_field_tooltip_until_pointer_leaves() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let tip = crate::settings::limits().complexity_tip;
+    let shown = || ElementHandle::find_by_accessible_label(&app, &tip).count();
+    let slider = only(&app, "Encoder complexity");
+    let (at, size) = (slider.absolute_position(), slider.size());
+    let center = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    let outside = slint::LogicalPosition::new(1.0, 1.0);
+
+    // Plain hover shows the tooltip.
+    hover_at(&app, outside);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(shown(), 1, "tooltip shows on plain hover");
+
+    // Pressing the slider hides the tooltip at once, and dragging (even vertically outside the
+    // slider's own height, still inside the Field) keeps it hidden.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    assert_eq!(shown(), 0, "tooltip hides immediately on slider press");
+
+    let dragged = slint::LogicalPosition::new(at.x + size.width * 0.75, at.y - 6.0);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: dragged });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(shown(), 0, "tooltip stays hidden while dragging");
+
+    // Releasing while over the slider keeps the tooltip hidden until the pointer leaves.
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        0,
+        "tooltip stays hidden after release while pointer remains over slider"
+    );
+
+    let nudged = slint::LogicalPosition::new(center.x + 4.0, center.y);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: nudged });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        0,
+        "tooltip stays hidden on movement within slider before leaving"
+    );
+
+    // Leaving and returning restores the hover tooltip.
+    hover_at(&app, outside);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        1,
+        "tooltip returns after pointer leaves and re-enters slider"
+    );
+
+    // Dragging off the slider and releasing outside must not leave tip-quiet latched.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: outside });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: outside,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    assert_eq!(
+        shown(),
+        1,
+        "releasing outside slider clears tip-quiet for next hover"
+    );
+
     app.hide().unwrap();
 }
 
@@ -2288,7 +2412,11 @@ fn every_text_token_meets_wcag_aa_on_every_surface_in_both_themes() {
         // glass-float over what a σ30 blur leaves of the queue behind a pane: the wallpaper, the
         // panes over it and their tints. Text and the small solid shapes (rings, checkboxes)
         // average out into those, and no large solid fill sits behind a pane (the bar's buttons
-        // are below the drawer); the modal dimmer is, behind the sheet and a dialog.
+        // are below the drawer); the modal dimmer is, behind the sheet and a dialog. Note: this
+        // models CSS-style exterior shadows; Slint 1.19 paints drop shadows behind translucent
+        // fills (negligible on shipped faked `float` and `glass-float-dim`, which stay >= 4.55:1,
+        // while `REAL_BLUR` light `glass-float` drops to 4.00:1 on accent-soft — tracked for P9's
+        // `REAL_BLUR` gate in PARITY.md).
         let sharp: Vec<(String, Color)> = texts
             .iter()
             .chain(&walls)
@@ -2405,12 +2533,7 @@ fn ink_of(family: &str, weight: i32, text: Option<&str>) -> u64 {
 /// carries far more ink than a light one, and none renders like the fallback font.
 #[test]
 fn fonts_resolve_their_weights() {
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .unwrap();
+    init_software_renderer();
     let fallback = ink("No Such Family", 400);
     for family in ["Onest", "Unbounded", "JetBrains Mono"] {
         let (light, regular, heavy) = (ink(family, 200), ink(family, 400), ink(family, 800));
@@ -2436,12 +2559,7 @@ fn cjk_names_render_through_the_system_font_fallback() {
         eprintln!("skipped: no CJK system font (fc-list :lang=ja is empty)");
         return;
     }
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .unwrap();
+    init_software_renderer();
     for name in ["葬送のフリーレン", "药屋少女的呢喃"] {
         // Private Use Area code points: no font has them.
         let missing: String = name.chars().map(|_| '\u{E000}').collect();
@@ -4463,12 +4581,7 @@ fn a_reorder_out_of_view_gives_a_row_made_later_no_focus() {
 #[test]
 fn reduce_motion_stops_the_spinning_rings() {
     use std::time::Duration;
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        mock_time: true,
-        threading: false,
-        renderer_name: Some("software".into()),
-    })))
-    .unwrap();
+    init_software_renderer();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
     let mut state = ViewState::new(None);
@@ -4762,10 +4875,8 @@ fn the_scanning_card_spins_a_26px_ring() {
 /// which style.css's `button { cursor: pointer }` covers.
 #[test]
 fn the_traffic_lights_and_the_steppers_show_the_pointer() {
-    use i_slint_backend_testing::testing_backend::TestingWindow;
     use i_slint_core::cursor::MouseCursorInner;
     use i_slint_core::items::BuiltInMouseCursor;
-    use i_slint_core::window::WindowInner;
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window()
@@ -4780,13 +4891,8 @@ fn the_traffic_lights_and_the_steppers_show_the_pointer() {
             &app,
             slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0),
         );
-        let adapter = WindowInner::from_pub(app.window()).window_adapter();
-        let window = adapter
-            .internal(i_slint_core::InternalToken)
-            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
-            .unwrap();
         matches!(
-            window.mouse_cursor(),
+            mouse_cursor(&app),
             MouseCursorInner::BuiltIn(BuiltInMouseCursor::Pointer)
         )
     };
@@ -4816,6 +4922,1597 @@ fn the_locked_label_sits_at_the_preset_headings_right_edge() {
         locked.absolute_position().x + locked.size().width,
         row.absolute_position().x + row.size().width - 8.0,
         "the label's right edge"
+    );
+    app.hide().unwrap();
+}
+
+/// Disabled controls render at style.css's 0.75 opacity through `Theme.disabled-opacity`.
+#[test]
+fn disabled_controls_render_at_disabled_opacity() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Show - 01.mkv")]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let opacity_of = |label: &str| {
+        only(&app, label)
+            .query_descendants()
+            .match_type_name("Text")
+            .find_first()
+            .expect("control text")
+            .computed_opacity()
+    };
+    assert_eq!(opacity_of("Select all"), 1.0);
+    assert_eq!(opacity_of("Increase workers"), 1.0);
+
+    state.busy = true;
+    state.remux.controls.selection_locked = true;
+    apply(&app, &state);
+    frame(&app);
+    assert_eq!(opacity_of("Select all"), 0.75);
+    assert_eq!(opacity_of("Increase workers"), 0.75);
+    app.hide().unwrap();
+}
+/// Scaled SVG Path icons grow their Path by `stroke-width` so Slint's default fit maps the
+/// 24-unit viewbox into the full icon box rather than insetting it by `stroke-width`.
+#[test]
+fn scaled_icons_span_their_full_svg_box_without_stroke_inset() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Completed,
+        label: "Done".into(),
+        tone: Tone::Ok,
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+    let shot = app.window().take_snapshot().unwrap();
+
+    // Row status Glyph tick: 14x14 visual box, viewbox 24x24, path x=5..19 (8.17px centerline)
+    // + 1.75px stroke = 9.92px analytic ink width; default-fit inset shrinks it to 8.90px.
+    let glyph = ElementHandle::find_by_element_type_name(&app, "Glyph")
+        .next()
+        .expect("status Glyph");
+    assert_eq!(glyph.size(), slint::LogicalSize::new(14.0, 14.0));
+    let at = glyph.absolute_position();
+    let (x0, y0) = (at.x.round() as u32, at.y.round() as u32);
+    let (mut min_x, mut max_x) = (u32::MAX, 0u32);
+    for dy in 0..14 {
+        for dx in 0..14 {
+            let px = shot.as_slice()[((y0 + dy) * shot.width() + (x0 + dx)) as usize];
+            if px.g > px.r.saturating_add(50) {
+                min_x = min_x.min(dx);
+                max_x = max_x.max(dx);
+            }
+        }
+    }
+    assert!(min_x <= max_x, "no ok-tone pixels drawn in status Glyph");
+    let tick_span = max_x - min_x + 1;
+    assert!(
+        tick_span >= 9,
+        "expected >= 9px painted tick span in 14px Glyph (no stroke inset), got {tick_span}px (x={min_x}..={max_x})"
+    );
+
+    // GearIcon: 17x17 visual box, viewbox 24x24, cog spans x=1..23 (15.58px centerline) + 1.35px
+    // stroke = 16.93px analytic ink span; default-fit inset shrinks it to 15.70px. Requiring
+    // solidly inked pixels (diff > 350, ~85% of full ink) excludes anti-aliasing fringes so the
+    // inset gear drops to 14x14 while the un-inset gear spans >= 16x16.
+    let gear = ElementHandle::find_by_element_type_name(&app, "GearIcon")
+        .next()
+        .expect("GearIcon");
+    assert_eq!(gear.size(), slint::LogicalSize::new(17.0, 17.0));
+    let g_at = gear.absolute_position();
+    let (gx0, gy0) = (g_at.x.round() as u32, g_at.y.round() as u32);
+    let bg = shot.as_slice()[((gy0 + 8) * shot.width() + (gx0 + 8)) as usize];
+    let (mut gmin_x, mut gmax_x, mut gmin_y, mut gmax_y) = (u32::MAX, 0u32, u32::MAX, 0u32);
+    for dy in 0..17 {
+        for dx in 0..17 {
+            let px = shot.as_slice()[((gy0 + dy) * shot.width() + (gx0 + dx)) as usize];
+            let diff = px.r.abs_diff(bg.r) as u32
+                + px.g.abs_diff(bg.g) as u32
+                + px.b.abs_diff(bg.b) as u32;
+            if diff > 350 {
+                gmin_x = gmin_x.min(dx);
+                gmax_x = gmax_x.max(dx);
+                gmin_y = gmin_y.min(dy);
+                gmax_y = gmax_y.max(dy);
+            }
+        }
+    }
+    let gear_span_x = gmax_x - gmin_x + 1;
+    let gear_span_y = gmax_y - gmin_y + 1;
+    assert!(
+        gear_span_x >= 16 && gear_span_y >= 16,
+        "expected >= 16x16 painted GearIcon span (no stroke inset), got {gear_span_x}x{gear_span_y}"
+    );
+
+    // Queue row checkbox tick: 10x10 Path with fit: preserve (x=1.5..8.5 centerline + 1.8px
+    // stroke = 8.80px analytic ink width; default-fit viewbox 10 shrinks it to 7.54px). Scan
+    // inside the 16x16 box (2..14) so the white background outside the 4px rounded corners is
+    // excluded.
+    let check = only(&app, "Include Show - 01.mkv in the batch");
+    assert_eq!(check.size(), slint::LogicalSize::new(16.0, 16.0));
+    let c_at = check.absolute_position();
+    let (cx0, cy0) = (c_at.x.round() as u32, c_at.y.round() as u32);
+    let (mut cmin_x, mut cmax_x) = (u32::MAX, 0u32);
+    for dy in 2..14 {
+        for dx in 2..14 {
+            let px = shot.as_slice()[((cy0 + dy) * shot.width() + (cx0 + dx)) as usize];
+            if px.r > 128 {
+                cmin_x = cmin_x.min(dx);
+                cmax_x = cmax_x.max(dx);
+            }
+        }
+    }
+    assert!(cmin_x <= cmax_x, "no white tick pixels in row checkbox");
+    let row_tick_span = cmax_x - cmin_x + 1;
+    assert!(
+        row_tick_span >= 8,
+        "expected >= 8px painted tick span in row checkbox (fit: preserve), got {row_tick_span}px (x={cmin_x}..={cmax_x})"
+    );
+    app.hide().unwrap();
+}
+
+/// Floating pane shadow and CapButton highlight/shadow tokens follow style.css per theme, and
+/// `GlassPane` splits its fill across outer and inner layers so their composite matches `Theme.float`.
+#[test]
+fn glass_pane_shadow_tokens_and_composite_fill_follow_theme() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let theme = app.global::<Theme>();
+
+    theme.invoke_set_dark(false);
+    assert_eq!(theme.get_pane_shadow_y(), 12.0);
+    assert_eq!(theme.get_pane_shadow_blur(), 32.0);
+    assert_eq!(theme.get_pane_shadow_near_blur(), 3.0);
+    theme.invoke_set_dark(true);
+    assert_eq!(theme.get_pane_shadow_y(), 14.0);
+    assert_eq!(theme.get_pane_shadow_blur(), 40.0);
+    assert_eq!(theme.get_pane_shadow_near_blur(), 3.0);
+    assert_eq!(theme.get_cap_shadow(), Color::from_argb_u8(0x24, 0, 0, 0));
+    assert_eq!(
+        theme.get_cap_hi(),
+        Color::from_argb_u8(0x66, 0xff, 0xff, 0xff)
+    );
+
+    for dark in [false, true] {
+        theme.invoke_set_dark(dark);
+        theme.set_reduce_transparency(false);
+        theme.set_glass(false);
+        app.set_appearance_open(false);
+        frame(&app);
+        let bg_shot = app.window().take_snapshot().unwrap();
+
+        app.set_appearance_open(true);
+        frame(&app);
+        let menu = ElementHandle::find_by_element_type_name(&app, "AppearanceMenu")
+            .next()
+            .expect("AppearanceMenu");
+        let (at, size) = (menu.absolute_position(), menu.size());
+        let faked_shot = app.window().take_snapshot().unwrap();
+
+        let in_x = (at.x + size.width - 14.0).round() as u32;
+        let in_y = (at.y + size.height - 14.0).round() as u32;
+        let bg_in = bg_shot.as_slice()[(in_y * bg_shot.width() + in_x) as usize];
+        let pane_in = faked_shot.as_slice()[(in_y * faked_shot.width() + in_x) as usize];
+        let float_c = theme.get_float();
+        let a = f32::from(float_c.alpha()) / 255.0;
+        let blend = |fg: u8, bg: u8| (f32::from(fg) * a + f32::from(bg) * (1.0 - a)).round() as u8;
+        assert!(
+            pane_in.r.abs_diff(blend(float_c.red(), bg_in.r)) <= 5
+                && pane_in.g.abs_diff(blend(float_c.green(), bg_in.g)) <= 5
+                && pane_in.b.abs_diff(blend(float_c.blue(), bg_in.b)) <= 5,
+            "dark={dark}: GlassPane composite fill diverged from Theme.float: got {pane_in:?}"
+        );
+    }
+    app.hide().unwrap();
+}
+
+/// `GlassPane` renders the crisp 1px/3px near shadow below its bottom edge and compensates both
+/// shadow layers for its split fill alphas so the near shadow keeps its full strength in both
+/// light and dark themes under solid, faked-glass (`Theme.float`), and real-glass fills.
+#[test]
+fn glass_pane_near_shadow_keeps_full_strength_under_translucent_fills() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let theme = app.global::<Theme>();
+
+    for dark in [false, true] {
+        theme.invoke_set_dark(dark);
+        theme.set_reduce_transparency(false);
+        theme.set_glass(false);
+        app.set_appearance_open(false);
+        frame(&app);
+        let bg_shot = app.window().take_snapshot().unwrap();
+
+        app.set_appearance_open(true);
+        frame(&app);
+        let menu = ElementHandle::find_by_element_type_name(&app, "AppearanceMenu")
+            .next()
+            .expect("AppearanceMenu");
+        let (at, size) = (menu.absolute_position(), menu.size());
+        let px_x = (at.x + size.width / 2.0).round() as u32;
+        let near_y = (at.y + size.height + 1.0).round() as u32;
+        let far_y = (at.y + size.height + 6.0).round() as u32;
+        let luma = |shot: &slint::SharedPixelBuffer<slint::Rgba8Pixel>, y: u32| {
+            let p = shot.as_slice()[(y * shot.width() + px_x) as usize];
+            f32::from(p.r) * 0.2126 + f32::from(p.g) * 0.7152 + f32::from(p.b) * 0.0722
+        };
+        let darkening = |bg: &slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+                         fg: &slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+                         y: u32| {
+            let b = luma(bg, y);
+            (b - luma(fg, y)) / b.max(1.0)
+        };
+
+        let faked_shot = app.window().take_snapshot().unwrap();
+        let faked_near = darkening(&bg_shot, &faked_shot, near_y);
+        let faked_step = faked_near - darkening(&bg_shot, &faked_shot, far_y);
+
+        theme.set_glass(true);
+        frame(&app);
+        let glass_shot = app.window().take_snapshot().unwrap();
+        let glass_near = darkening(&bg_shot, &glass_shot, near_y);
+        let glass_step = glass_near - darkening(&bg_shot, &glass_shot, far_y);
+
+        theme.set_glass(false);
+        theme.set_reduce_transparency(true);
+        app.set_appearance_open(false);
+        frame(&app);
+        let solid_bg = app.window().take_snapshot().unwrap();
+        app.set_appearance_open(true);
+        frame(&app);
+        let solid_shot = app.window().take_snapshot().unwrap();
+        let solid_near = darkening(&solid_bg, &solid_shot, near_y);
+        let solid_step = solid_near - darkening(&solid_bg, &solid_shot, far_y);
+
+        // The 1px/3px near shadow decays between y = bottom + 1 and y = bottom + 6 while the
+        // 32px/40px far shadow is nearly flat over those 5px, so removing or under-weighting the
+        // near shadow collapses this step in both themes.
+        let min_step = if dark { 0.10 } else { 0.025 };
+        assert!(
+            solid_step >= min_step && faked_step >= min_step && glass_step >= min_step,
+            "dark={dark}: expected >= {min_step:.3} near-shadow step (bottom+1 vs bottom+6), got solid={solid_step:.4}, faked={faked_step:.4}, glass={glass_step:.4}"
+        );
+        assert!(
+            (faked_near - solid_near).abs() < 0.008 && (glass_near - solid_near).abs() < 0.008,
+            "dark={dark}: near shadow weakened under translucent fill: solid={solid_near:.4}, faked={faked_near:.4}, glass={glass_near:.4}"
+        );
+    }
+    app.hide().unwrap();
+}
+
+/// The shared teal CheckBox in the settings sheet and Appearance menu keeps checkbox accessibility,
+/// toggles on Space only (not Return), outlines only its 16px box on keyboard focus, and paints
+/// its 16px box in `Theme.accent` when checked.
+#[test]
+fn custom_checkboxes_toggle_with_space_and_report_accessibility() {
+    use i_slint_backend_testing::AccessibleRole;
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    use slint::platform::Key;
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1200.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let edited = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Rc::clone(&edited);
+    app.global::<Sheet>()
+        .on_edited(move |key| log.borrow_mut().push(key.into()));
+
+    // Sheet checkboxes: Shift+Tab from Done lands on Clear inspection cache, then Bypass cache,
+    // then Dry run; Space toggles each (Return does not) and updates accessible-checked.
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let dry_run = only(&app, "Dry run (plan only, write nothing)");
+    let no_cache = only(&app, "Bypass inspection cache");
+    assert_eq!(dry_run.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(no_cache.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(dry_run.accessible_checked(), Some(false));
+    assert_eq!(no_cache.accessible_checked(), Some(false));
+
+    key(&app, Key::Backtab); // Clear inspection cache
+    key(&app, Key::Backtab); // Bypass inspection cache
+    assert_eq!(focused(&app), "Bypass inspection cache");
+
+    // Keyboard focus ring wraps only the 16x16 box (2px gap + 2px border => 24x24), not the row.
+    let ring = ElementHandle::find_by_element_type_name(&app, "FocusRing")
+        .find(|el| el.size().width > 0.0 && el.size().height > 0.0)
+        .expect("focused CheckBox FocusRing");
+    assert_eq!(
+        ring.size(),
+        slint::LogicalSize::new(24.0, 24.0),
+        "CheckBox focus ring must outline the 16px box, not the label row"
+    );
+
+    // Return must not toggle a checkbox (native <input type=checkbox> toggles on Space only).
+    key(&app, Key::Return);
+    assert!(!app.get_remux_form().no_cache);
+    assert_eq!(no_cache.accessible_checked(), Some(false));
+
+    key(&app, Key::Space);
+    assert!(app.get_remux_form().no_cache);
+    assert_eq!(no_cache.accessible_checked(), Some(true));
+
+    // Checked box renders in Theme.accent (teal), not fluent's system accent blue.
+    frame(&app);
+    let shot = app.window().take_snapshot().unwrap();
+    let accent = app.global::<Theme>().get_accent();
+    let (at, size) = (no_cache.absolute_position(), no_cache.size());
+    // Top-left corner pixel inside the 16x16 box (centered vertically inside the checkbox row),
+    // clear of the white checkmark stroke.
+    let bx = (at.x + 2.0).round() as u32;
+    let by = (at.y + (size.height - 16.0) / 2.0 + 2.0).round() as u32;
+    let px = shot.as_slice()[(by * shot.width() + bx) as usize];
+    assert!(
+        px.r.abs_diff(accent.red()) <= 3
+            && px.g.abs_diff(accent.green()) <= 3
+            && px.b.abs_diff(accent.blue()) <= 3,
+        "expected Theme.accent {:?} in 16px checkbox box at ({bx},{by}), got {px:?}",
+        (accent.red(), accent.green(), accent.blue())
+    );
+
+    key(&app, Key::Backtab); // Dry run
+    assert_eq!(focused(&app), "Dry run (plan only, write nothing)");
+    key(&app, Key::Space);
+    assert!(app.get_remux_form().dry_run);
+    assert_eq!(dry_run.accessible_checked(), Some(true));
+    assert_eq!(*edited.borrow(), ["no_cache", "dry_run"]);
+
+    // In the locked sheet, only the 16px box dims to Theme.disabled-opacity (0.75) and shows
+    // not-allowed; the label stays at 1.0 with the default cursor (style.css `input:disabled`).
+    let mut locked = ViewState::new(None);
+    locked.busy = true;
+    apply(&app, &locked);
+    frame(&app);
+    let box_el = dry_run
+        .query_descendants()
+        .match_id("CheckBox::box")
+        .find_first()
+        .expect("CheckBox::box");
+    let label_el = dry_run
+        .query_descendants()
+        .match_type_name("Text")
+        .find_first()
+        .expect("CheckBox label");
+    assert_eq!(box_el.computed_opacity(), 0.75);
+    assert_eq!(label_el.computed_opacity(), 1.0);
+    let cursor_at = |x: f32, y: f32| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        hover_at(&app, slint::LogicalPosition::new(x, y));
+        mouse_cursor(&app)
+    };
+    let (bat, bsize) = (box_el.absolute_position(), box_el.size());
+    assert_eq!(
+        cursor_at(bat.x + bsize.width / 2.0, bat.y + bsize.height / 2.0),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "disabled CheckBox box shows not-allowed"
+    );
+    let (lat, lsize) = (label_el.absolute_position(), label_el.size());
+    assert_eq!(
+        cursor_at(lat.x + lsize.width / 2.0, lat.y + lsize.height / 2.0),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default),
+        "disabled CheckBox label keeps default cursor"
+    );
+
+    apply(&app, &ViewState::new(None));
+    app.invoke_close_sheet();
+    frame(&app);
+
+    // Appearance menu checkboxes: Tab from System -> Light -> Dark -> Reduce transparency -> Reduce motion.
+    appearance_button(&app).invoke_accessible_default_action();
+    frame(&app);
+    let theme = app.global::<Theme>();
+    let rt = only(&app, "Reduce transparency (solid panes)");
+    let rm = only(&app, "Reduce motion (fewer animations)");
+    assert_eq!(rt.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(rm.accessible_role(), Some(AccessibleRole::Checkbox));
+    assert_eq!(rt.accessible_checked(), Some(false));
+    assert_eq!(rm.accessible_checked(), Some(false));
+
+    key(&app, Key::Tab); // Light
+    key(&app, Key::Tab); // Dark
+    key(&app, Key::Tab); // Reduce transparency
+    assert_eq!(focused(&app), "Reduce transparency (solid panes)");
+    key(&app, Key::Space);
+    assert!(theme.get_reduce_transparency());
+    assert_eq!(rt.accessible_checked(), Some(true));
+
+    key(&app, Key::Tab); // Reduce motion
+    assert_eq!(focused(&app), "Reduce motion (fewer animations)");
+    key(&app, Key::Space);
+    assert!(theme.get_reduce_motion());
+    assert_eq!(rm.accessible_checked(), Some(true));
+    app.hide().unwrap();
+}
+
+/// The custom teal complexity slider exposes horizontal slider accessibility (value/min/max/step),
+/// responds to Left/Right/Up/Down/Home/End keys, snaps pointer drags, commits only on real changes
+/// (including cancelled drags), clamps out-of-range mirrored box values, and restores focus after a
+/// dialog over the sheet closes.
+#[test]
+fn custom_complexity_slider_handles_keys_drag_and_accessibility() {
+    use i_slint_backend_testing::{AccessibleRole, Orientation};
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    let slid = Rc::new(RefCell::new(Vec::<f32>::new()));
+    let slid_log = Rc::clone(&slid);
+    app.global::<Sheet>()
+        .on_slid(move |value| slid_log.borrow_mut().push(value));
+    let committed = Rc::new(RefCell::new(Vec::<String>::new()));
+    let commit_log = Rc::clone(&committed);
+    app.global::<Sheet>()
+        .on_committed(move |key| commit_log.borrow_mut().push(key.into()));
+
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let slider = ElementHandle::find_by_accessible_label(&app, "Encoder complexity")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+        .expect("the complexity slider");
+    assert_eq!(
+        slider.accessible_orientation(),
+        Some(Orientation::Horizontal)
+    );
+    assert_eq!(slider.accessible_value().as_deref(), Some("5"));
+    assert_eq!(slider.accessible_value_minimum(), Some(0.0));
+    assert_eq!(slider.accessible_value_maximum(), Some(10.0));
+    assert_eq!(slider.accessible_value_step(), Some(1.0));
+
+    // Pointer press at ~34% of the track focuses the slider and snaps to 3; drag to ~78% snaps to 8.
+    let (at, size) = (slider.absolute_position(), slider.size());
+    let track = size.width - 16.0;
+    let y = at.y + size.height / 2.0;
+    let pos = |frac: f32| slint::LogicalPosition::new(at.x + 8.0 + track * frac, y);
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.34),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("3"));
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: pos(0.32),
+    });
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: pos(0.78),
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("8"));
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.78),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(*slid.borrow(), [3.0, 8.0]);
+    assert_eq!(*committed.borrow(), ["complexity"]);
+
+    // Left, Right, Up, Down, Home and End keys step/jump and commit on key release.
+    key(&app, Key::RightArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+    key(&app, Key::LeftArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("8"));
+    key(&app, Key::UpArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+    key(&app, Key::DownArrow);
+    assert_eq!(slider.accessible_value().as_deref(), Some("8"));
+    key(&app, Key::Home);
+    assert_eq!(slider.accessible_value().as_deref(), Some("0"));
+    // No-op at minimum (Home at 0) commits nothing.
+    let before_noop = committed.borrow().len();
+    key(&app, Key::Home);
+    assert_eq!(
+        committed.borrow().len(),
+        before_noop,
+        "Home at min must not commit"
+    );
+    key(&app, Key::End);
+    assert_eq!(slider.accessible_value().as_deref(), Some("10"));
+    assert_eq!(*slid.borrow(), [3.0, 8.0, 9.0, 8.0, 9.0, 8.0, 0.0, 10.0]);
+    assert_eq!(*committed.borrow(), vec!["complexity"; 7]);
+
+    // No-op a11y increment at maximum commits nothing.
+    slider.invoke_accessible_increment_action();
+    assert_eq!(
+        committed.borrow().len(),
+        7,
+        "increment at max must not commit"
+    );
+
+    // Screen-reader decrement, increment, and set-value actions step and commit when changed.
+    slider.invoke_accessible_decrement_action();
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+    slider.invoke_accessible_increment_action();
+    assert_eq!(slider.accessible_value().as_deref(), Some("10"));
+    slider.set_accessible_value("4.4");
+    assert_eq!(slider.accessible_value().as_deref(), Some("4"));
+    assert_eq!(*committed.borrow(), vec!["complexity"; 10]);
+
+    // No-op pointer click+release on the current value (4) commits nothing.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        10,
+        "pointer click at current value must not commit"
+    );
+
+    // A form publication that moves the value while the pointer is held is not the user's edit:
+    // the release commits nothing (only a pointer step of the drag counts).
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    let kept = app.get_remux_form();
+    let mut form = kept.clone();
+    form.complexity = "7".into();
+    app.set_remux_form(form);
+    frame(&app);
+    assert_eq!(slider.accessible_value().as_deref(), Some("7"));
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.4),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        10,
+        "a publication during a held press must not commit"
+    );
+    app.set_remux_form(kept);
+    frame(&app);
+
+    // Interrupted drag (PointerExited sends Cancel with button == Other): ends drag once,
+    // commits once, and subsequent moves no longer drag.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.2),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("2"));
+    app.window().dispatch_event(WindowEvent::PointerExited);
+    assert_eq!(
+        committed.borrow().len(),
+        11,
+        "PointerExited cancel commits once"
+    );
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.9) });
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("2"),
+        "cancelled drag stops tracking"
+    );
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.9),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        11,
+        "release after cancel does not double-commit"
+    );
+
+    // Locking mid-drag (busy -> live turns false): ends the drag silently without emitting
+    // `released` (so the host does not send a second EditDraft after the lock), and unlocking
+    // leaves dragging cleared.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.6),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("6"));
+    let mut locked = ViewState::new(None);
+    locked.busy = true;
+    apply(&app, &locked);
+    frame(&app);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.8) });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.8),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        committed.borrow().len(),
+        11,
+        "locking mid-drag must end silently without committing"
+    );
+    // The locked slider shows style.css `input:disabled`'s not-allowed cursor.
+    // Measured again: the lock moves the slider in the sheet.
+    let cursor_at = |frac: f32| {
+        let (at, size) = (slider.absolute_position(), slider.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        hover_at(
+            &app,
+            slint::LogicalPosition::new(
+                at.x + 8.0 + (size.width - 16.0) * frac,
+                at.y + size.height / 2.0,
+            ),
+        );
+        mouse_cursor(&app)
+    };
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    assert_eq!(
+        cursor_at(0.5),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "the locked slider shows not-allowed"
+    );
+    apply(&app, &ViewState::new(None));
+    frame(&app);
+    assert_eq!(
+        cursor_at(0.5),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default),
+        "the unlocked slider shows the default cursor"
+    );
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.9) });
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("6"),
+        "drag stays cleared after unlocking"
+    );
+
+    // A release away from the last move (a touch's last position) is the drag's last step.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.6),
+        button: PointerEventButton::Left,
+    });
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.7) });
+    assert_eq!(slider.accessible_value().as_deref(), Some("7"));
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.8),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("8"),
+        "the release position is the last step"
+    );
+    assert_eq!(slid.borrow().last(), Some(&8.0));
+    assert_eq!(committed.borrow().len(), 12, "the drag commits once");
+
+    // Out-of-range draft text in the complexity box ("15") stays "15" in the form while follow()
+    // clamps the slider to 10: increment at the displayed maximum must emit neither slid nor
+    // committed (it would fire both if follow() left 15 in the slider), then decrement lands on 9.
+    let mut form = app.get_remux_form();
+    form.complexity = "15".into();
+    app.set_remux_form(form);
+    frame(&app);
+    assert_eq!(app.get_remux_form().complexity, "15");
+    assert_eq!(slider.accessible_value().as_deref(), Some("10"));
+    let slid_before_inc = slid.borrow().len();
+    let committed_before_inc = committed.borrow().len();
+    slider.invoke_accessible_increment_action();
+    assert_eq!(
+        slid.borrow().len(),
+        slid_before_inc,
+        "increment at clamped max must not fire slid"
+    );
+    assert_eq!(
+        committed.borrow().len(),
+        committed_before_inc,
+        "increment at clamped max must not fire committed"
+    );
+    slider.invoke_accessible_decrement_action();
+    assert_eq!(slider.accessible_value().as_deref(), Some("9"));
+
+    // Focus returns to the slider after a dialog over the sheet closes.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.5),
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.5),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(slider.accessible_value().as_deref(), Some("5"));
+    assert_eq!(focused(&app), "Encoder complexity");
+    app.invoke_show_dialog();
+    frame(&app);
+    app.set_dialog_open(false);
+    frame(&app);
+    assert_eq!(focused(&app), "Encoder complexity");
+    key(&app, Key::RightArrow);
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("6"),
+        "slider still has focus after dialog over sheet closes"
+    );
+    app.hide().unwrap();
+}
+
+/// The row status ring keeps its coordinates (`fit: preserve`) so its 3px stroke fills 19px of
+/// its 20px box instead of shrinking to the viewbox's inset (both the progress arc and the
+/// neutral track in the unpainted quarter).
+#[test]
+fn status_ring_fills_19px_of_its_20px_box() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        tone: Tone::Info,
+        progress: Some(75.0),
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    let shot = app.window().take_snapshot().unwrap();
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("the status ring");
+    let (at, size) = (ring.absolute_position(), ring.size());
+    assert_eq!(size, slint::LogicalSize::new(20.0, 20.0));
+    let (x0, y0) = (at.x.round() as u32, at.y.round() as u32);
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0, u32::MAX, 0);
+    for dy in 0..20 {
+        for dx in 0..20 {
+            let idx = ((y0 + dy) * shot.width() + (x0 + dx)) as usize;
+            let px = shot.as_slice()[idx];
+            if px.b > px.r.saturating_add(30) {
+                min_x = min_x.min(dx);
+                max_x = max_x.max(dx);
+                min_y = min_y.min(dy);
+                max_y = max_y.max(dy);
+            }
+        }
+    }
+    assert!(min_x <= max_x, "no info-tone pixels drawn in Ring");
+    let span_x = max_x - min_x + 1;
+    let span_y = max_y - min_y + 1;
+    assert!(
+        (19..=20).contains(&span_x) && (19..=20).contains(&span_y),
+        "expected 19px painted ring inside 20px box, got {span_x}x{span_y} (x={min_x}..={max_x}, y={min_y}..={max_y})"
+    );
+
+    // Sample the neutral Theme.line track in the unpainted top-left quadrant (dx < 8, dy < 8)
+    // against the unpainted ring centre (10, 10): removing or shrinking the track fails this.
+    let center = shot.as_slice()[((y0 + 10) * shot.width() + (x0 + 10)) as usize];
+    let mut track_pixels = 0u32;
+    let mut max_track_r = 0.0f32;
+    for dy in 0..8 {
+        for dx in 0..8 {
+            let px = shot.as_slice()[((y0 + dy) * shot.width() + (x0 + dx)) as usize];
+            let diff = px.r.abs_diff(center.r) as u32
+                + px.g.abs_diff(center.g) as u32
+                + px.b.abs_diff(center.b) as u32;
+            if diff >= 18 && px.b <= px.r.saturating_add(20) {
+                track_pixels += 1;
+                let r = (dx as f32 + 0.5 - 10.0).hypot(dy as f32 + 0.5 - 10.0);
+                max_track_r = max_track_r.max(r);
+            }
+        }
+    }
+    assert!(
+        track_pixels >= 8 && max_track_r >= 8.5,
+        "expected full-size neutral track in Ring's unpainted top-left quarter, got {track_pixels} px, max radius {max_track_r:.2}"
+    );
+    app.hide().unwrap();
+}
+
+/// The Inspector's episode path and custom output folder draw each `›` separator as its own `Text`
+/// and show the joined path as a hover tooltip; the plain default output folder shows no tooltip.
+#[test]
+fn inspector_crumbs_show_path_tooltips_and_separate_chevron_texts() {
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    let mut view = sample_view();
+    view.crumbs = vec!["media".into(), "Anime".into(), "Season 1".into()];
+    view.out_crumbs = Some(vec!["out".into(), "Show".into()]);
+    state.remux.inspector = Some(view);
+    apply(&app, &state);
+    app.show().unwrap();
+
+    let hover = |label: &str| {
+        let element = only(&app, label);
+        let (at, size) = (element.absolute_position(), element.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    };
+    let tips = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+
+    assert_eq!(tips(), 0);
+    hover("media › Anime › Season 1");
+    assert_eq!(tips(), 1, "episode path shows its tooltip on hover");
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "media › Anime › Season 1").count(),
+        2,
+        "Crumbs plus TipCard"
+    );
+
+    hover("out › Show");
+    assert_eq!(tips(), 1, "custom output folder shows its tooltip on hover");
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&app, "out › Show").count(),
+        2
+    );
+
+    // Close the hover tooltip before inspecting the Crumbs subtrees, then assert each Text
+    // directly by its text string and computed opacity (0.6 on "›", 1.0 on segments).
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    {
+        use i_slint_core::accessibility::AccessibleStringProperty;
+        use i_slint_core::item_tree::ItemRc;
+        use i_slint_core::items::{ComplexText, Opacity, SimpleText};
+        use i_slint_core::window::WindowInner;
+
+        fn find_by_label(item: &ItemRc, label: &str) -> Option<ItemRc> {
+            if item
+                .accessible_string_property(AccessibleStringProperty::Label)
+                .as_deref()
+                == Some(label)
+            {
+                return Some(item.clone());
+            }
+            let mut child = item.first_child();
+            while let Some(c) = child {
+                if let Some(found) = find_by_label(&c, label) {
+                    return Some(found);
+                }
+                child = c.next_sibling();
+            }
+            None
+        }
+
+        fn collect_texts(item: &ItemRc, opacity: f32, out: &mut Vec<(String, f32)>) {
+            let opacity = item
+                .downcast::<Opacity>()
+                .map_or(opacity, |op| opacity * op.as_pin_ref().opacity());
+            if let Some(t) = item.downcast::<ComplexText>() {
+                out.push((t.as_pin_ref().text().to_string(), opacity));
+            } else if let Some(t) = item.downcast::<SimpleText>() {
+                out.push((t.as_pin_ref().text().to_string(), opacity));
+            }
+            let mut child = item.first_child();
+            while let Some(c) = child {
+                collect_texts(&c, opacity, out);
+                child = c.next_sibling();
+            }
+        }
+
+        let root = ItemRc::new_root(WindowInner::from_pub(app.window()).component());
+        let parts_of = |label: &str| {
+            let crumbs = find_by_label(&root, label).expect("Crumbs element");
+            let mut out = Vec::new();
+            collect_texts(&crumbs, 1.0, &mut out);
+            out
+        };
+        assert_eq!(
+            parts_of("media › Anime › Season 1"),
+            vec![
+                ("media".into(), 1.0),
+                ("›".into(), 0.6),
+                ("Anime".into(), 1.0),
+                ("›".into(), 0.6),
+                ("Season 1".into(), 1.0),
+            ]
+        );
+        assert_eq!(
+            parts_of("out › Show"),
+            vec![("out".into(), 1.0), ("›".into(), 0.6), ("Show".into(), 1.0)]
+        );
+    }
+
+    // Plain default output folder shows no tooltip on hover.
+    let mut plain_state = ViewState::new(None);
+    let mut plain_view = sample_view();
+    plain_view.out_crumbs = None;
+    plain_state.remux.inspector = Some(plain_view);
+    apply(&app, &plain_state);
+    hover("Output folder next to the input");
+    assert_eq!(tips(), 0, "plain default output folder shows no tooltip");
+    app.hide().unwrap();
+}
+
+/// Tooltips drop 24px below the pointer hotspot (clearing a 24px cursor like GTK), flip above near
+/// the window bottom, stay on one line for sentence tips while wrapping long paths at 440px,
+/// centre horizontally on the pointer, clamp inside both window edges, and keep the tooltip plus
+/// `not-allowed` cursor on disabled buttons (`Run remux`).
+#[test]
+fn tooltips_place_below_cursor_centred_and_clamped_in_window() {
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    app.global::<Theme>().invoke_set_dark(true);
+    let mut state = ViewState::new(None);
+    let mut view = sample_view();
+    view.crumbs = vec![
+        "media".into(),
+        "Anime".into(),
+        "Frieren Beyond Journeys End Season 1".into(),
+    ];
+    state.remux.inspector = Some(view);
+    state.remux.controls.run_disabled = true;
+    state.remux.controls.run_title = "Open a folder with episodes first".into();
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+
+    let hover_el = |el: &ElementHandle| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (el.absolute_position(), el.size());
+        let p = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: p });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+        p
+    };
+    let card = || {
+        ElementHandle::find_by_element_type_name(&app, "TipCard")
+            .next()
+            .expect("visible TipCard")
+    };
+    let cursor_now = || mouse_cursor(&app);
+
+    // Near the right window edge: card drops >= 20px below the cursor, right-edge clamp engages
+    // (right == 912), and the gap under the cursor is untouched (no 18x12 ToolTipImpl box).
+    let crumb = only(&app, "media › Anime › Frieren Beyond Journeys End Season 1");
+    let before_right = app.window().take_snapshot().unwrap();
+    let pr = hover_el(&crumb);
+    let cr = card();
+    let (cr_at, cr_size) = (cr.absolute_position(), cr.size());
+    assert!(
+        cr_at.y >= pr.y + 20.0,
+        "right tooltip top {} must be >= pointer.y {} + 20",
+        cr_at.y,
+        pr.y
+    );
+    assert!(
+        ((cr_at.x + cr_size.width) - 912.0).abs() <= 0.5,
+        "right tooltip right edge {} must clamp to 912",
+        cr_at.x + cr_size.width
+    );
+    let after_right = app.window().take_snapshot().unwrap();
+    let gap_idx =
+        ((pr.y + 10.0).round() as u32 * after_right.width() + pr.x.round() as u32) as usize;
+    assert_eq!(
+        before_right.as_slice()[gap_idx],
+        after_right.as_slice()[gap_idx],
+        "no ToolTipImpl box painted in the cursor gap above the tooltip card"
+    );
+
+    // Near the left window edge: card drops >= 20px below the cursor and left-edge clamp engages
+    // (x == 8).
+    let close = only(&app, "Close window");
+    let pl = hover_el(&close);
+    let cl = card();
+    let (cl_at, _) = (cl.absolute_position(), cl.size());
+    assert!(
+        cl_at.y >= pl.y + 20.0,
+        "left tooltip top {} must be >= pointer.y {} + 20",
+        cl_at.y,
+        pl.y
+    );
+    assert!(
+        (cl_at.x - 8.0).abs() <= 0.5,
+        "left tooltip left edge {} must clamp to 8",
+        cl_at.x
+    );
+
+    // Near the window bottom on disabled Run remux: flips above the pointer (bottom <= pointer.y - 8,
+    // top >= 8), keeps its tooltip while disabled, and shows the not-allowed cursor.
+    let run = only(&app, "Run remux");
+    let pb = hover_el(&run);
+    assert_eq!(
+        cursor_now(),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "disabled Run remux must show not-allowed cursor"
+    );
+    let cb = card();
+    let (cb_at, cb_size) = (cb.absolute_position(), cb.size());
+    assert!(
+        cb_at.y >= 8.0 && cb_at.y + cb_size.height <= pb.y - 7.5,
+        "bottom tooltip [{}, {}] must flip above pointer.y {} within top margin 8",
+        cb_at.y,
+        cb_at.y + cb_size.height,
+        pb.y
+    );
+
+    // Long path tip wraps at 440px onto multiple lines.
+    let mut long_view = sample_view();
+    long_view.crumbs = vec![
+        "media".into(),
+        "Anime".into(),
+        "Very Long Series Title With Season Information And Release Group".into(),
+        "Episode 01 Extended Cut 1080p Dual Audio.mkv".into(),
+    ];
+    let mut long_state = ViewState::new(None);
+    long_state.remux.inspector = Some(long_view);
+    apply(&app, &long_state);
+    frame(&app);
+    let long_crumb = only(
+        &app,
+        "media › Anime › Very Long Series Title With Season Information And Release Group › Episode 01 Extended Cut 1080p Dual Audio.mkv",
+    );
+    hover_el(&long_crumb);
+    let cw = card();
+    let cw_size = cw.size();
+    assert!(
+        cw_size.width <= 440.5 && cw_size.width >= 380.0 && cw_size.height > 32.0,
+        "long path tooltip should wrap at 440px onto multiple lines, got {}x{}",
+        cw_size.width,
+        cw_size.height
+    );
+
+    // Middle (Encoder complexity box in SettingsSheet): >= 20px below cursor, horizontally centred
+    // on the pointer, and single-line (not wrapped at 320px). A taller window, so the box is
+    // more than a card and the 8px edge margin above the bottom edge.
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    app.window().set_size(slint::LogicalSize::new(920.0, 760.0));
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let cplx = only(&app, "Encoder complexity value");
+    let pm = hover_el(&cplx);
+    let cm = card();
+    let (cm_at, cm_size) = (cm.absolute_position(), cm.size());
+    assert!(
+        cm_at.y >= pm.y + 20.0,
+        "complexity tooltip top {} must be >= pointer.y {} + 20",
+        cm_at.y,
+        pm.y
+    );
+    let center_x = cm_at.x + cm_size.width / 2.0;
+    assert!(
+        (center_x - pm.x).abs() <= 2.0,
+        "complexity tooltip center {center_x} must be within 2px of pointer.x {}",
+        pm.x
+    );
+    assert!(
+        cm_size.height <= 32.0 && cm_size.width > 320.0,
+        "complexity tooltip should stay on one line (> 320px wide, <= 32px tall), got {}x{}",
+        cm_size.width,
+        cm_size.height
+    );
+
+    // A card whose bottom would land inside the 8px bottom margin flips above the pointer.
+    let tip = app.global::<crate::Tip>();
+    tip.set_text("Edge margin".into());
+    tip.set_x(400.0);
+    tip.set_y(100.0);
+    tip.set_visible(true);
+    frame(&app);
+    let height = card().size().height;
+    // 4px from the 760px window's bottom edge, were it placed below.
+    let pointer_y = 760.0 - 24.0 - height - 4.0;
+    tip.set_y(pointer_y);
+    frame(&app);
+    let flipped = card();
+    assert!(
+        flipped.absolute_position().y + flipped.size().height <= pointer_y,
+        "a card 4px from the bottom edge flips above the pointer"
+    );
+    app.hide().unwrap();
+}
+
+/// Tooltips cannot outlive a removed element, cannot be killed by a stale leave from the previous
+/// control, and hide like a browser `title` on pointer exit, any key press, left press over any
+/// TipArea (row status, Field label), wheel scroll, and sheet/dialog/mode transitions.
+#[test]
+fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
+    use crate::Tip;
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![Row {
+        status: ItemStatus::Processing,
+        label: "Processing".into(),
+        title: "Encoding audio track".into(),
+        tone: Tone::Info,
+        progress: Some(50.0),
+        ..row("Show - 01.mkv")
+    }]);
+    state.remux.empty = None;
+    apply(&app, &state);
+    app.show().unwrap();
+    frame(&app);
+
+    let tip_count = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+    let hover_pos = |p: slint::LogicalPosition| {
+        app.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: p });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+    };
+    let hover_el = |el: &ElementHandle| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (el.absolute_position(), el.size());
+        let p = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        hover_pos(p);
+        p
+    };
+
+    // 1. Small moves inside the same control keep a shown tooltip visible (no single-frame blink
+    // or premature 0ms stale-timer cancellation before TipArea's deferred `changed` handler runs).
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("row status Ring");
+    let row_pos = hover_el(&ring);
+    assert_eq!(tip_count(), 1, "row status tooltip shows on hover");
+    for step in 1..=4 {
+        let p = slint::LogicalPosition::new(row_pos.x + (step as f32 - 2.0) * 2.0, row_pos.y);
+        app.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: p });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(30));
+        assert_eq!(
+            tip_count(),
+            1,
+            "move {step} inside the same control must keep TipCard visible"
+        );
+    }
+
+    // Left press on a non-Pressable TipArea (row status) hides the tip and keeps it quiet until
+    // the pointer leaves; wheel scroll over it also hides it.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: row_pos,
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: row_pos,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "left press over row status TipArea hides tip"
+    );
+    hover_pos(slint::LogicalPosition::new(row_pos.x + 1.0, row_pos.y));
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving inside row status after press keeps tip quiet"
+    );
+
+    // Re-enter row status, then wheel scroll hides the tip.
+    let row_pos = hover_el(&ring);
+    assert_eq!(tip_count(), 1, "row status tooltip re-arms after leaving");
+    app.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: row_pos,
+        delta_x: 0.0,
+        delta_y: -30.0,
+    });
+    frame(&app);
+    assert_eq!(tip_count(), 0, "wheel scroll hides shown tooltip");
+
+    // 2. A hovered TipArea removed without the publisher's hide (the rows model swapped
+    // directly, as a removal the publisher does not know about) leaves the card up while the
+    // pointer rests; the window-level watcher (`tip-stale-timer`) clears it ~100ms after the
+    // pointer next moves, or at once when it leaves the window, and returning to the old pixel
+    // does not revive it.
+    let clear_rows = || {
+        app.set_remux_rows(slint::ModelRc::new(slint::VecModel::<
+            mkv_anime_batch_slint_ui::QueueRow,
+        >::default()));
+        frame(&app);
+    };
+    let row_pos = hover_el(&ring);
+    assert_eq!(
+        tip_count(),
+        1,
+        "row status tooltip shown before its removal"
+    );
+    clear_rows();
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(400.0, 300.0),
+    });
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "the orphaned card stays until the stale debounce runs out"
+    );
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(120));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving after the hovered TipArea disappears hides the orphaned tooltip within ~100ms"
+    );
+    hover_pos(row_pos);
+    assert_eq!(
+        tip_count(),
+        0,
+        "moving back to the removed TipArea's pixel does not revive the old tooltip"
+    );
+
+    apply(&app, &state);
+    frame(&app);
+    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+        .next()
+        .expect("row status Ring restored");
+    hover_el(&ring);
+    assert_eq!(
+        tip_count(),
+        1,
+        "row status tooltip shown before exit-after-removal"
+    );
+    clear_rows();
+    assert_eq!(
+        tip_count(),
+        1,
+        "the orphaned card stays while the pointer rests"
+    );
+    app.window().dispatch_event(WindowEvent::PointerExited);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "PointerExited hides an orphaned tooltip after its TipArea disappeared"
+    );
+    apply(&app, &state);
+    frame(&app);
+
+    // 3. Direct move from tipped control A to tipped control B: stale leave(A) must not kill B.
+    let close = only(&app, "Close window");
+    let min = only(&app, "Minimize window");
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "Close window tip shows");
+    let (mat, msize) = (min.absolute_position(), min.size());
+    hover_pos(slint::LogicalPosition::new(
+        mat.x + msize.width / 2.0,
+        mat.y + msize.height / 2.0,
+    ));
+    assert_eq!(
+        tip_count(),
+        1,
+        "moving directly from Close to Minimize arms Minimize's tip"
+    );
+    assert_eq!(
+        app.global::<Tip>().get_text(),
+        "Minimize",
+        "Tip holds the new control's text"
+    );
+
+    // 4. PointerExited hides a shown tip.
+    app.window().dispatch_event(WindowEvent::PointerExited);
+    frame(&app);
+    assert_eq!(tip_count(), 0, "PointerExited hides shown tooltip");
+
+    // 5. Any key press (window key scope) hides a shown tip.
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before key press");
+    key(&app, Key::Shift);
+    assert_eq!(tip_count(), 0, "key press hides shown tooltip");
+
+    // 6. UI state transitions: sheet open, dialog open, and mode change each hide a shown tip.
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before opening sheet");
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    assert_eq!(tip_count(), 0, "opening sheet hides shown tooltip");
+
+    // Left press on a Field label (non-Pressable TipArea wrapping Encoder complexity) hides tip.
+    let cplx_box = only(&app, "Encoder complexity value");
+    let (cat, _) = (cplx_box.absolute_position(), cplx_box.size());
+    let label_pos = slint::LogicalPosition::new(cat.x + 12.0, cat.y - 10.0);
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    hover_pos(label_pos);
+    assert_eq!(tip_count(), 1, "Field label hover shows complexity tooltip");
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: label_pos,
+        button: PointerEventButton::Left,
+    });
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: label_pos,
+        button: PointerEventButton::Left,
+    });
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "left press over Field label TipArea hides tip"
+    );
+
+    app.invoke_close_sheet();
+    frame(&app);
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before opening dialog");
+    app.invoke_show_dialog();
+    frame(&app);
+    assert_eq!(tip_count(), 0, "opening dialog hides shown tooltip");
+    app.set_dialog_open(false);
+    frame(&app);
+
+    hover_el(&close);
+    assert_eq!(tip_count(), 1, "tip shown before switching mode");
+    app.set_mode(Mode::Extract);
+    frame(&app);
+    assert_eq!(tip_count(), 0, "switching mode hides shown tooltip");
+    app.hide().unwrap();
+}
+
+/// A tooltip goes with its area even when the pointer does not move: a title that empties under
+/// it (the area stays, off), a row reset or a row patched hidden (the area is destroyed), a
+/// disabled button enabled and the bar's chips going under 900px all hide the card at once; a
+/// removal hides only its own area's card (`Tip.owner`), so another control's card, another row's
+/// A hovered subtitle rung's card goes with the Inspector when a publication shows none (a scan
+/// that leaves no episodes stages no new ladder), with the pointer still.
+#[test]
+fn a_rung_tooltip_hides_when_the_inspector_goes() {
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(1100.0, 800.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.remux.rows = Arc::new(vec![row("Season 1/ep1.mkv")]);
+    state.remux.empty = None;
+    state.remux.inspector = Some(sample_view());
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+    let tip = app.global::<crate::Tip>();
+    let shown = ElementHandle::find_by_element_type_name(&app, "TipArea").any(|area| {
+        let (at, size) = (area.absolute_position(), area.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+        tip.get_owner() == "rung" && tip.get_visible()
+    });
+    assert!(shown, "a found rung shows its detail on hover");
+
+    state.seq += 1;
+    state.remux.rows = Arc::new(Vec::new());
+    state.remux.inspector = None;
+    publisher.show(&state);
+    frame(&app);
+    assert!(
+        !tip.get_visible() && tip.get_owner().is_empty(),
+        "the Inspector gone under a resting pointer hides the rung's card"
+    );
+    app.hide().unwrap();
+}
+
+/// with the same title, and one over the other mode's update survive.
+#[test]
+fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
+    init_software_renderer();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
+    // Each publication a newer one: the publisher drops a state no newer than the last.
+    let seq = std::cell::Cell::new(0);
+    let titled_row = |name: &str, title: &str| {
+        let mut state = ViewState::new(None);
+        seq.set(seq.get() + 1);
+        state.seq = seq.get();
+        state.remux.rows = Arc::new(vec![Row {
+            status: ItemStatus::Processing,
+            label: "Processing".into(),
+            title: title.into(),
+            tone: Tone::Info,
+            progress: Some(50.0),
+            ..row(name)
+        }]);
+        state.remux.empty = None;
+        state
+    };
+    let titled = |title: &str| titled_row("Show - 01.mkv", title);
+    // One publisher throughout, so a changed title is a row patch in place and another episode's
+    // row a reset, as in the app.
+    let publisher = SlintPublisher::new(&app);
+    publisher.show(&titled("Encoding audio track"));
+    app.show().unwrap();
+    frame(&app);
+    let tip_count = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+    let show_tip = || {
+        let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
+            .next()
+            .expect("row status Ring");
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (ring.absolute_position(), ring.size());
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+        assert_eq!(tip_count(), 1, "the row status tooltip shows on hover");
+    };
+
+    show_tip();
+    publisher.show(&titled(""));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "a title emptied under a resting pointer hides the card"
+    );
+
+    publisher.show(&titled("Encoding audio track"));
+    frame(&app);
+    show_tip();
+    // Another episode's row: the model is replaced (`RowPatch::Reset`), destroying the area.
+    publisher.show(&titled_row("Show - 02.mkv", "Encoding audio track"));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "a row reset under a resting pointer hides the card"
+    );
+
+    // Under To do, a hovered row that is done is patched hidden (no reset): its area goes too.
+    let todo = titled_row("Show - 02.mkv", "Encoding audio track");
+    publisher.show(&todo);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    frame(&app);
+    show_tip();
+    let mut done = titled_row("Show - 02.mkv", "Encoding audio track");
+    Arc::make_mut(&mut done.remux.rows)[0].bucket = Some(Bucket::Done);
+    publisher.show(&done);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "a row patched hidden under a resting pointer hides the card"
+    );
+
+    // Another control's tooltip survives a patch that hides a row it does not belong to.
+    let hover_center = |el: &ElementHandle| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (el.absolute_position(), el.size());
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+    };
+    publisher.show(&titled_row("Show - 02.mkv", "Encoding audio track"));
+    frame(&app);
+    hover_center(&only(&app, "Close window"));
+    assert_eq!(tip_count(), 1, "the Close window tooltip shows");
+    let mut done = titled_row("Show - 02.mkv", "Encoding audio track");
+    Arc::make_mut(&mut done.remux.rows)[0].bucket = Some(Bucket::Done);
+    publisher.show(&done);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "a row patched hidden keeps another control's tooltip"
+    );
+
+    // Two rows with the same status title: hiding one keeps the other's card, as the card's
+    // owner is a row, not a text.
+    let same_titles = |second_done: bool| {
+        let mut state = titled_row("Show - 03.mkv", "Cancelled");
+        let mut second = state.remux.rows[0].clone();
+        second.id = "Show - 04.mkv".into();
+        if second_done {
+            second.bucket = Some(Bucket::Done);
+        }
+        Arc::make_mut(&mut state.remux.rows).push(second);
+        state
+    };
+    publisher.show(&same_titles(false));
+    frame(&app);
+    hover_center(
+        &ElementHandle::find_by_element_type_name(&app, "Ring")
+            .next()
+            .expect("the first row's Ring"),
+    );
+    assert_eq!(tip_count(), 1, "the first row's status tooltip shows");
+    publisher.show(&same_titles(true));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "hiding a row with the same title keeps the hovered row's card"
+    );
+
+    // A reset of the shown mode's rows (another folder's) keeps another control's card.
+    hover_center(&only(&app, "Close window"));
+    assert_eq!(tip_count(), 1, "the Close window tooltip shows");
+    publisher.show(&titled_row("Show - 05.mkv", "Encoding audio track"));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "a row reset keeps another control's tooltip"
+    );
+
+    // The other mode's reset keeps the shown mode's row card.
+    let mut extract = titled_row("Show - 05.mkv", "Encoding audio track");
+    hover_center(
+        &ElementHandle::find_by_element_type_name(&app, "Ring")
+            .next()
+            .expect("the remux row's Ring"),
+    );
+    assert_eq!(tip_count(), 1, "the remux row's status tooltip shows");
+    extract.extract.rows = Arc::new(vec![row("Other.mkv")]);
+    extract.extract.empty = None;
+    publisher.show(&extract);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "extract's row reset keeps the remux row's card"
+    );
+
+    // Disabled Run's tooltip goes when Run is enabled under a resting pointer.
+    let mut disabled = titled("Encoding audio track");
+    disabled.remux.controls.run_disabled = true;
+    disabled.remux.controls.run_title = "Open a folder with episodes first".into();
+    publisher.show(&disabled);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    hover_center(&only(&app, "Run remux"));
+    assert_eq!(tip_count(), 1, "disabled Run shows why");
+    publisher.show(&titled("Encoding audio track"));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "Run enabled under a resting pointer hides its disabled tooltip"
+    );
+
+    // The bar's chips go under 900px with the pointer resting on them (a window snapped narrower).
+    let chips = ElementHandle::find_by_element_id(&app, "BottomBar::chip-block")
+        .next()
+        .expect("the bar's chips at 920px");
+    hover_center(&chips);
+    assert_eq!(tip_count(), 1, "the chips' tooltip shows");
+    app.window().set_size(slint::LogicalSize::new(860.0, 640.0));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "the chips removed under a resting pointer hide their card"
     );
     app.hide().unwrap();
 }

@@ -3,10 +3,10 @@
 // bindings only: the host (desktop-slint/src/settings.rs) maps the published Settings Draft, sends
 // the edits and holds every rule: which field a publication writes back, the steppers' repeat, the
 // hints and the preset texts.
-import { Button, CheckBox, ScrollView, Slider } from "std-widgets.slint";
+import { Button, ScrollView } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
 import { CapButton, PillButton } from "jobs.slint";
-import { Focus, Pressable, Select, TextField, TipCard } from "focus.slint";
+import { CheckBox, Focus, Pressable, Select, Slider, TextField, TipArea } from "focus.slint";
 
 // One mode's Settings Draft as the sheet shows it, every field as typed but the two checkboxes.
 // The remux-only fields stay empty in extract's. `bitrate` is the index of the bitrate select's
@@ -129,15 +129,27 @@ export global Sheet {
 }
 
 // The gear icon (index.html .task-settings-btn svg): a cog around a circle.
-component GearIcon inherits Path {
+component GearIcon inherits Rectangle {
+    in property <brush> stroke;
     width: 17px;
     height: 17px;
-    viewbox-width: 24;
-    viewbox-height: 24;
-    stroke-width: 1.9px;
-    stroke-line-cap: round;
-    stroke-line-join: round;
-    commands: "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+    // Grow the Path by stroke-width so Slint's default fit maps the 24-unit viewbox into the full
+    // 17px box without inset shrinkage.
+    Path {
+        x: -self.stroke-width / 2;
+        y: -self.stroke-width / 2;
+        width: parent.width + self.stroke-width;
+        height: parent.height + self.stroke-width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.stroke;
+        // The SVG's 1.9 in its 24-unit viewbox.
+        stroke-width: 1.9px * 17 / 24;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: "M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
+        accessible-role: none;
+    }
 }
 
 // A mode tab's gear (.icon-btn.task-settings-btn): opens the mode's settings sheet, which gives the
@@ -165,7 +177,7 @@ export component PresetRow inherits Pressable {
     background: item.active ? Theme.accent-soft : self.hovered && self.enabled ? Theme.hover : transparent;
     border-width: item.active ? 1px : 0px;
     border-color: Theme.accent-ring;
-    opacity: self.enabled ? 1 : 0.75;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     accessible-label: item.a11y;
     accessible-checkable: true;
     accessible-checked: item.active;
@@ -216,44 +228,45 @@ export component SectionHead inherits Text {
 
 // A labelled field (.field-label): the label, and a "required" tag, over its control. `tip` is
 // the label's `title`: a hover tooltip over the whole field, its control and buttons included, as
-// the webview's `<label>` wraps them. Not a layout itself: a `Tooltip` cannot sit in one.
+// the webview's `<label>` wraps them (via TipArea wrapping the field's layout).
 component Field inherits Rectangle {
     in property <string> label;
     in property <bool> required;
     in property <string> tip;
+    // Suppresses the hover tooltip while an inner control (the complexity slider) is pressed or
+    // dragged and until the pointer leaves it, matching a browser's `title` tooltip.
+    in property <bool> tip-quiet;
     // Columns of fields share the width evenly (.grid-2, .grid-3).
     min-width: 0px;
     preferred-width: 0px;
     horizontal-stretch: 1;
-    VerticalLayout {
-        spacing: 4px;
-        HorizontalLayout {
-            spacing: 6px;
-            alignment: start;
-            Text {
-                text: root.label;
-                color: Theme.mute;
-                font-size: 12px;
-                font-weight: 500;
-                line-height-factor: Theme.lh-body;
-                accessible-role: none;
+    TipArea {
+        tip: root.tip;
+        tip-quiet: root.tip-quiet;
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Text {
+                    text: root.label;
+                    color: Theme.mute;
+                    font-size: 12px;
+                    font-weight: 500;
+                    line-height-factor: Theme.lh-body;
+                    accessible-role: none;
+                }
+                if root.required: Text {
+                    text: "REQUIRED";
+                    color: Theme.warn;
+                    font-size: 10px;
+                    font-weight: 600;
+                    letter-spacing: 0.5px;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
             }
-            if root.required: Text {
-                text: "REQUIRED";
-                color: Theme.warn;
-                font-size: 10px;
-                font-weight: 600;
-                letter-spacing: 0.5px;
-                vertical-alignment: center;
-                accessible-role: none;
-            }
-        }
-        @children
-    }
-    // Last, so it is over the field: it watches the pointer and passes every event on.
-    if root.tip != "": Tooltip {
-        TipCard {
-            text: root.tip;
+            @children
         }
     }
 }
@@ -335,8 +348,9 @@ component FolderField inherits Field {
         }
         Button {
             text: "Browse…";
-            // Inert under the dialog (only the sheet has folder fields), as the sheet's other
-            // fluent widgets: their screen reader actions ignore anything but `enabled`.
+            // Inert under the dialog (only the sheet has folder fields); Browse… is the sheet's
+            // only remaining fluent widget, and fluent's screen-reader actions ignore anything but
+            // `enabled`.
             enabled: root.enabled && !root.dialog-open;
             accessible-label: "Browse for the " + root.label;
             changed has-focus => {
@@ -363,8 +377,8 @@ component StepButton inherits Pressable {
     border-bottom-left-radius: root.up ? 0px : 8px;
     border-top-right-radius: root.up ? 8px : 0px;
     border-bottom-right-radius: root.up ? 8px : 0px;
-    background: self.pressed ? Theme.sel : self.hovered && root.enabled ? Theme.hover : Theme.field;
-    opacity: root.enabled ? 1 : 0.5;
+    background: Theme.field;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
     pointer-click: false;
     // Only the sheet has them.
     layer: 1;
@@ -484,12 +498,18 @@ export component SettingsSheet inherits GlassPane {
     // The height the head and every section take, unscrolled.
     out property <length> natural-height: head.preferred-height + 1px + body.preferred-height;
 
-    // The slider's value, which follows the typed complexity while it reads as a number.
+    // The slider's value, which follows the typed complexity (clamped and snapped to the range)
+    // while it reads as a number; the box keeps the raw draft text.
     property <float> complexity: 5;
     changed form => { self.follow(); }
     function follow() {
         if root.form.complexity.is-float() {
-            root.complexity = root.form.complexity.to-float();
+            let raw = root.form.complexity.to-float();
+            if root.limits.complexity-max > root.limits.complexity-min {
+                root.complexity = Math.round(clamp(raw, root.limits.complexity-min, root.limits.complexity-max));
+            } else {
+                root.complexity = Math.round(raw);
+            }
         }
     }
     // Done takes the focus unless a field took it for `Sheet.focus-key`: on opening, and again
@@ -533,7 +553,7 @@ export component SettingsSheet inherits GlassPane {
     width: 580px;
     // .sheet.glass (GlassPane).
     border-radius: 26px;
-    clip: true;
+    clip-content: true;
     accessible-role: groupbox;
     accessible-label: root.title;
 
@@ -740,6 +760,7 @@ export component SettingsSheet inherits GlassPane {
                             Field {
                                 label: "Encoder complexity";
                                 tip: root.limits.complexity-tip;
+                                tip-quiet: complexity-slider.tip-quiet;
                                 HorizontalLayout {
                                     spacing: 6px;
                                     Rectangle {
@@ -747,24 +768,20 @@ export component SettingsSheet inherits GlassPane {
                                         border-radius: 6px;
                                         border-width: root.invalid == "complexity" ? 2px : 0px;
                                         border-color: Theme.err;
-                                        Slider {
+                                        complexity-slider := Slider {
                                             x: 4px;
+                                            y: (parent.height - self.height) / 2;
                                             width: parent.width - 8px;
                                             minimum: root.limits.complexity-min;
                                             maximum: root.limits.complexity-max;
                                             step: 1;
                                             value <=> root.complexity;
-                                            // Inert under the dialog, as Browse….
-                                            enabled: !root.locked && !root.dialog-open;
+                                            enabled: !root.locked;
+                                            layer: 1;
                                             accessible-label: "Encoder complexity";
                                             accessible-description: root.limits.complexity-tip;
-                                            // Whole steps alone, as a range input's: fluent's
-                                            // drag does not snap to `step`.
-                                            changed(value) => {
-                                                let step = Math.round(value);
-                                                self.value = step;
-                                                Sheet.slid(step);
-                                            }
+                                            // Whole steps alone: Slider snaps drags, keys and a11y edits.
+                                            changed(value) => { Sheet.slid(value); }
                                             released => { Sheet.committed("complexity"); }
                                             // A focus id of its own, so moving between the
                                             // slider and the box leaves one and enters the other.
@@ -851,10 +868,11 @@ export component SettingsSheet inherits GlassPane {
                         CheckBox {
                             text: "Dry run (plan only, write nothing)";
                             checked <=> root.form.dry-run;
-                            enabled: !root.locked && !root.dialog-open;
+                            enabled: !root.locked;
+                            layer: 1;
                             toggled => { Sheet.edited("dry_run"); }
-                            changed has-focus => {
-                                if self.has-focus {
+                            changed focused => {
+                                if self.focused {
                                     Sheet.reveal(self.absolute-position.y, self.height);
                                 }
                             }
@@ -862,10 +880,11 @@ export component SettingsSheet inherits GlassPane {
                         CheckBox {
                             text: "Bypass inspection cache";
                             checked <=> root.form.no-cache;
-                            enabled: !root.locked && !root.dialog-open;
+                            enabled: !root.locked;
+                            layer: 1;
                             toggled => { Sheet.edited("no_cache"); }
-                            changed has-focus => {
-                                if self.has-focus {
+                            changed focused => {
+                                if self.focused {
                                     Sheet.reveal(self.absolute-position.y, self.height);
                                 }
                             }

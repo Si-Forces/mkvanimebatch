@@ -1,9 +1,8 @@
 // Redesign C's title bar (desktop-tauri/ui/index.html .titlebar): the traffic lights, the brand, a
 // drag area behind them, the theme toggle and the Appearance button, and the Appearance menu the
 // window shows under it. Layout and bindings only; the host does what the buttons ask.
-import { CheckBox } from "std-widgets.slint";
 import { GlassPane, Theme } from "theme.slint";
-import { Pressable } from "focus.slint";
+import { CheckBox, Pressable } from "focus.slint";
 import { SectionHead } from "settings.slint";
 
 component TrafficLight inherits Pressable {
@@ -165,7 +164,7 @@ export component AppearanceMenu inherits GlassPane {
                 reduce-motion.focus();
                 return accept;
             }
-            if !back && event.text == Key.Tab && reduce-motion.has-focus {
+            if !back && event.text == Key.Tab && reduce-motion.focused {
                 system.focus();
                 return accept;
             }
@@ -209,19 +208,13 @@ export component AppearanceMenu inherits GlassPane {
             }
             CheckBox {
                 text: "Reduce transparency (solid panes)";
-                checked: Theme.reduce-transparency;
-                toggled => {
-                    Theme.reduce-transparency = self.checked;
-                    Theme.effects-changed();
-                }
+                checked <=> Theme.reduce-transparency;
+                toggled => { Theme.effects-changed(); }
             }
             reduce-motion := CheckBox {
                 text: "Reduce motion (fewer animations)";
-                checked: Theme.reduce-motion;
-                toggled => {
-                    Theme.reduce-motion = self.checked;
-                    Theme.effects-changed();
-                }
+                checked <=> Theme.reduce-motion;
+                toggled => { Theme.effects-changed(); }
             }
         }
     }

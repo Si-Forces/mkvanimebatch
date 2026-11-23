@@ -5,17 +5,17 @@ import "fonts/Unbounded-wght.ttf";
 import "fonts/JetBrainsMono-wght.ttf";
 import { Theme } from "theme.slint";
 import { AppearanceMenu, TitleBar } from "title-bar.slint";
-import { Focus, Pressable } from "focus.slint";
+import { Focus, Pressable, Tip, TipCard } from "focus.slint";
 import { FontProbe } from "font-probe.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Mode, QueueFilter, QueueHead, QueuePane, QueueRow, RowMark, RowTone, Spin } from "queue.slint";
-import { Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
+import { CrumbPart, Inspector, InspectorPane, LibraryEntry, LibraryItem, Rung } from "inspector.slint";
 import { ChipTexts, DraftForm, GearButton, PresetItem, PresetRow, SettingsSheet, Sheet, SheetLimits } from "settings.slint";
 import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone, Telemetry } from "jobs.slint";
 import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, Focus, Spin, FontProbe, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
+export { Theme, Focus, Tip, Spin, FontProbe, CrumbPart, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
 
 // A mode's tab in the sidebar (.task-row): its icon, its name over what it does and its status
 // pill (a dot), then the gear that opens its settings sheet.
@@ -34,7 +34,12 @@ component ModeTab inherits Rectangle {
     // 56px: 16px + 27px for .nav-text's 15.6px + 26.4px.
     height: max(44px, texts.preferred-height + 13px);
     border-radius: 8px;
-    background: tab-area.hovered || gear.hovered ? Theme.hover : active ? Theme.sel : transparent;
+    background: active ? Theme.sel : transparent;
+    // .task-row:hover layers --hover over the active row's --sel rather than replacing it.
+    Rectangle {
+        border-radius: parent.border-radius;
+        background: tab-area.hovered || gear.hovered ? Theme.hover : transparent;
+    }
     tab-area := Pressable {
         x: 0;
         width: parent.width - gear.width - 4px;
@@ -122,7 +127,7 @@ component OpenFolderNav inherits Pressable {
     height: 13px * 1.45 + 14px;
     border-radius: 8px;
     background: self.hovered && self.enabled ? Theme.hover : transparent;
-    opacity: self.enabled ? 1 : 0.75;
+    opacity: self.enabled ? 1 : Theme.disabled-opacity;
     // Its visible text, as the webview names it, apart from the queue card's "Open folder…".
     accessible-label: "+ Open folder…";
     focus-key: "nav:open-folder";
@@ -347,7 +352,9 @@ export component App inherits Window {
         if !root.dialog-open {
             root.dialog-return = root.appearance-open ? "Appearance" : Focus.current;
             root.appearance-open = false;
-            root.dialog-field = Sheet.focused;
+            // The complexity slider restores through Focus.restore (its focus-key is its accessible
+            // label); Sheet.focused == "complexity_slider" is only for DraftKey write-back.
+            root.dialog-field = Sheet.focused == "complexity_slider" ? "" : Sheet.focused;
             root.dialog-open = true;
         }
     }
@@ -356,10 +363,20 @@ export component App inherits Window {
     // dialog opens, also when `sheet-open` or `dialog-open` is set without `open-sheet` or
     // `show-dialog`: its choices would act behind it.
     changed sheet-open => {
+        Tip.hide();
         root.sheet-made = self.sheet-open;
         if self.sheet-open {
             root.appearance-open = false;
         }
+    }
+    changed appearance-open => {
+        Tip.hide();
+    }
+    changed log-open => {
+        Tip.hide();
+    }
+    changed mode => {
+        Tip.hide();
     }
     // The dialog opened: it is made a pass later (`dialog-made`), and the Appearance menu closes.
     // It closed: what had the focus takes it back, as a closing <dialog> gives it back. Over the
@@ -367,6 +384,7 @@ export component App inherits Window {
     // sheet's fallback); with no sheet the window's key scope takes it first, so Esc still
     // reaches it when the control is gone or locked (the removed dialog dropped the focus).
     changed dialog-open => {
+        Tip.hide();
         root.dialog-made = self.dialog-open;
         if self.dialog-open {
             root.appearance-open = false;
@@ -454,6 +472,22 @@ export component App inherits Window {
         insp-pane.flush();
     }
 
+    // A tooltip stays alive while the window pointer matches the position last reported by its
+    // owning TipArea/Pressable. On a pointer move `tip-watch.mouse-x/y` updates before the
+    // owner's deferred `changed` handler runs, so `tip-stale-timer` debounces the mismatch
+    // check (100ms) and `TipCard` renders on `Tip.visible` alone: small moves inside a live
+    // control never flicker or cancel the card, while a move after the owner disappears clears
+    // `Tip` once the debounce fires so returning to the old pixel never revives it.
+    property <bool> tip-alive: Tip.text != "" && tip-watch.has-hover
+        && abs(tip-watch.mouse-x - Tip.owner-x) <= 0.5px
+        && abs(tip-watch.mouse-y - Tip.owner-y) <= 0.5px;
+    property <int> tip-serial: Tip.serial;
+    changed tip-serial => {
+        if root.tip-alive && !Tip.visible {
+            tip-timer.restart();
+        }
+    }
+
     Rectangle {
         // Placed, so the window's size (which picks the pane widths above) is not its content's.
         x: 0;
@@ -479,9 +513,10 @@ export component App inherits Window {
             color: #00000001;
             accessible-role: none;
         }
-        // The same for the floating panes' blurred shadow (GlassPane): its first draw costs a
-        // missed vsync on the HD 4000 (the Log drawer's first open in the FrameStats bench), so a
-        // tiny one is drawn, all but transparent, from the first frame.
+        // The same for the floating panes' blurred shadows (GlassPane: far blur and 3px near
+        // shadow): their first draw costs a missed vsync on the HD 4000 (the Log drawer's first
+        // open in the FrameStats bench), so tiny ones are drawn, all but transparent, from the
+        // first frame. CapButton's 8px shadow needs none: BottomBar draws it on frame 1.
         Rectangle {
             x: 0;
             y: 0;
@@ -492,72 +527,99 @@ export component App inherits Window {
             drop-shadow-blur: Theme.pane-shadow-blur;
             drop-shadow-color: #00000001;
         }
-
-        // The wallpaper (--wall): three soft blobs over the base.
         Rectangle {
-            x: -460px;
-            y: -550px;
-            width: 1100px;
-            height: 1100px;
-            background: @radial-gradient(circle, Theme.wall-a 0%, Theme.wall-a.transparentize(100%) 60%);
-        }
-        Rectangle {
-            x: parent.width - 450px;
-            y: parent.height - 450px;
-            width: 900px;
-            height: 900px;
-            background: @radial-gradient(circle, Theme.wall-b 0%, Theme.wall-b.transparentize(100%) 58%);
-        }
-        Rectangle {
-            x: parent.width * 0.58 - 380px;
-            y: parent.height * 0.42 - 380px;
-            width: 760px;
-            height: 760px;
-            background: @radial-gradient(circle, Theme.wall-c 0%, Theme.wall-c.transparentize(100%) 62%);
+            x: 0;
+            y: 0;
+            width: 1px;
+            height: 1px;
+            background: #00000001;
+            drop-shadow-blur: Theme.pane-shadow-near-blur;
+            drop-shadow-color: #00000001;
         }
 
-        // The window's keys (app.js's keydown): this scope holds the focus from the start, so a
-        // key reaches it before anything took the focus. Ctrl+T (Cmd+T: Slint reads Cmd as
-        // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
-        // Appearance menu included, so it is caught before the focused item. Esc closes the
-        // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
-        // themselves, is open; it bubbles here from whatever has the focus. It notes which way each
-        // Tab goes (`Focus.backward`) for the queue list's entry stops.
-        keys := FocusScope {
-            focus-on-click: false;
-            focus-on-tab-navigation: false;
-            init => { self.focus(); }
-            capture-key-pressed(event) => {
-                if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
-                    Theme.toggle();
-                    return accept;
+        // The wallpaper (--wall): three soft elliptical blobs over the base, painted bottom to top
+        // so blob A sits over B over C as CSS lists them top to bottom.
+        Rectangle {
+            property <length> cx: parent.width * 0.58;
+            property <length> cy: parent.height * 0.42;
+            width: parent.width;
+            height: parent.height;
+            background: @radial-gradient(ellipse 760px 520px at self.cx self.cy, Theme.wall-c 0%, Theme.wall-c.transparentize(100%) 62%);
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: @radial-gradient(ellipse 900px 620px at parent.width parent.height, Theme.wall-b 0%, Theme.wall-b.transparentize(100%) 58%);
+        }
+        Rectangle {
+            property <length> cx: parent.width * 0.06;
+            width: parent.width;
+            height: parent.height;
+            background: @radial-gradient(ellipse 1100px 700px at self.cx 0px, Theme.wall-a 0%, Theme.wall-a.transparentize(100%) 60%);
+        }
+
+        // Window-level pointer watcher: compares the real window pointer against the active
+        // TipArea/Pressable's last reported position so a tooltip can never stay stuck after its
+        // hovered element is removed by an `if` or row reset, and hides on exit/press/scroll.
+        tip-watch := TouchArea {
+            changed has-hover => {
+                if !self.has-hover {
+                    Tip.hide();
                 }
-                if event.text == Key.Tab || event.text == Key.Backtab {
-                    Focus.backward = event.text == Key.Backtab || event.modifiers.shift;
+            }
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                    Tip.hide();
                 }
-                // A key the user typed shows the focused control's ring (:focus-visible), not a
-                // modifier alone nor a shortcut.
-                if !(event.modifiers.control || event.modifiers.meta || event.modifiers.alt)
-                    && event.text != Key.Shift && event.text != Key.ShiftR
-                    && event.text != Key.Control && event.text != Key.ControlR
-                    && event.text != Key.Alt && event.text != Key.AltGr
-                    && event.text != Key.Meta && event.text != Key.MetaR
-                    && event.text != Key.CapsLock {
-                    Focus.keyboard = true;
-                }
+            }
+            scroll-event(event) => {
+                Tip.hide();
                 reject
             }
-            key-pressed(event) => {
-                if event.text == Key.Escape && root.appearance-open {
-                    root.close-appearance();
-                    return accept;
+
+            // The window's keys (app.js's keydown): this scope holds the focus from the start, so a
+            // key reaches it before anything took the focus. Ctrl+T (Cmd+T: Slint reads Cmd as
+            // control on macOS) toggles the theme from anywhere, a field, the sheet, a dialog or the
+            // Appearance menu included, so it is caught before the focused item. Esc closes the
+            // Appearance menu, else the Log drawer unless the sheet or the dialog, which take it
+            // themselves, is open; it bubbles here from whatever has the focus. It notes which way each
+            // Tab goes (`Focus.backward`) for the queue list's entry stops.
+            keys := FocusScope {
+                focus-on-click: false;
+                focus-on-tab-navigation: false;
+                init => { self.focus(); }
+                capture-key-pressed(event) => {
+                    Tip.hide();
+                    if event.text.to-lowercase() == "t" && !event.repeat && (event.modifiers.control || event.modifiers.meta) {
+                        Theme.toggle();
+                        return accept;
+                    }
+                    if event.text == Key.Tab || event.text == Key.Backtab {
+                        Focus.backward = event.text == Key.Backtab || event.modifiers.shift;
+                    }
+                    // A key the user typed shows the focused control's ring (:focus-visible), not a
+                    // modifier alone nor a shortcut.
+                    if !(event.modifiers.control || event.modifiers.meta || event.modifiers.alt)
+                        && event.text != Key.Shift && event.text != Key.ShiftR
+                        && event.text != Key.Control && event.text != Key.ControlR
+                        && event.text != Key.Alt && event.text != Key.AltGr
+                        && event.text != Key.Meta && event.text != Key.MetaR
+                        && event.text != Key.CapsLock {
+                        Focus.keyboard = true;
+                    }
+                    reject
                 }
-                if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
-                    root.close-log();
-                    return accept;
+                key-pressed(event) => {
+                    if event.text == Key.Escape && root.appearance-open {
+                        root.close-appearance();
+                        return accept;
+                    }
+                    if event.text == Key.Escape && root.log-open && !root.sheet-open && !root.dialog-open {
+                        root.close-log();
+                        return accept;
+                    }
+                    reject
                 }
-                reject
-            }
             VerticalLayout {
                 title-bar := TitleBar {
                     appearance-open: root.appearance-open;
@@ -659,17 +721,25 @@ export component App inherits Window {
                                             padding-bottom: 4px;
                                             HorizontalLayout {
                                                 spacing: 4px;
-                                                Path {
+                                                Rectangle {
                                                     y: (parent.height - self.height) / 2;
                                                     width: 11px;
                                                     height: 11px;
-                                                    viewbox-width: 24;
-                                                    viewbox-height: 24;
-                                                    stroke: Theme.warn;
-                                                    stroke-width: 2.4px;
-                                                    stroke-line-cap: round;
-                                                    commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
-                                                    accessible-role: none;
+                                                    // Grow the Path by stroke-width to cancel Slint's default-fit inset.
+                                                    Path {
+                                                        x: -self.stroke-width / 2;
+                                                        y: -self.stroke-width / 2;
+                                                        width: parent.width + self.stroke-width;
+                                                        height: parent.height + self.stroke-width;
+                                                        viewbox-width: 24;
+                                                        viewbox-height: 24;
+                                                        stroke: Theme.warn;
+                                                        // The SVG's 2.4 in its 24-unit viewbox.
+                                                        stroke-width: 2.4px * 11 / 24;
+                                                        stroke-line-cap: round;
+                                                        commands: "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z M8 11V7a4 4 0 0 1 8 0v4";
+                                                        accessible-role: none;
+                                                    }
                                                 }
                                                 Text {
                                                     text: "Locked";
@@ -910,6 +980,34 @@ export component App inherits Window {
                 serial: root.dialog-serial;
                 answered(confirmed) => { root.dialog-answered(confirmed); }
             }
+            }
+        }
+
+        tip-stale-timer := Timer {
+            interval: 100ms;
+            running: Tip.text != "" && !root.tip-alive;
+            triggered => {
+                if !root.tip-alive {
+                    Tip.hide();
+                }
+            }
+        }
+        // Hover tooltip overlay and 500ms show delay (matching Slint's TooltipArea and GTK).
+        tip-timer := Timer {
+            interval: 500ms;
+            running: root.tip-alive && !Tip.visible;
+            triggered => {
+                if root.tip-alive {
+                    Tip.show();
+                }
+            }
+        }
+        if Tip.visible: TipCard {
+            text: Tip.text;
+            pointer-x: Tip.x;
+            pointer-y: Tip.y;
+            window-width: root.width;
+            window-height: root.height;
         }
     }
 }
