@@ -63,7 +63,20 @@ pub(crate) struct Taken {
     pub(crate) logs: [LogPatch; 2],
 }
 
-/// The pending slot. A push answers whether the caller must schedule a hop; the hop calls `take`.
+/// What [`Coalescer::push_state`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pushed {
+    /// Whether the state is at least as new as the newest state seen (`seq >= newest`).
+    /// An equally new state is dropped from the pending slot (already applied), yet is still
+    /// current for the one-time boot mode switch (`core.state()` shares the last publication's seq).
+    pub(crate) current: bool,
+    /// Whether the caller must schedule a hop to the event loop.
+    pub(crate) schedule: bool,
+}
+
+/// The pending slot. [`push_state`](Self::push_state) returns a [`Pushed`] (whether the state is
+/// current and whether to schedule a hop); other pushes answer whether to schedule a hop, and the
+/// hop calls `take`.
 #[derive(Default)]
 pub(crate) struct Coalescer(Mutex<Pending>);
 
@@ -74,14 +87,18 @@ impl Coalescer {
     }
 
     /// Keeps `state` unless a state as new is already pushed, with each mode's update against
-    /// what its model holds. Returns whether to schedule a hop.
-    pub(crate) fn push_state(&self, state: &ViewState) -> bool {
+    /// what its model holds. Reports whether `state` is current (`seq >= newest`) and whether to
+    /// schedule a hop.
+    pub(crate) fn push_state(&self, state: &ViewState) -> Pushed {
         let stale = |pending: &Pending| pending.newest.is_some_and(|newest| newest >= state.seq);
         let views = [&state.remux, &state.extract];
         let filters = {
             let pending = self.lock();
             if stale(&pending) {
-                return false;
+                return Pushed {
+                    current: pending.newest == Some(state.seq),
+                    schedule: false,
+                };
             }
             [0, 1].map(|i| pending.lists[i].wants_rows(views[i]))
         };
@@ -92,14 +109,20 @@ impl Coalescer {
         });
         let mut pending = self.lock();
         if stale(&pending) {
-            return false;
+            return Pushed {
+                current: pending.newest == Some(state.seq),
+                schedule: false,
+            };
         }
         pending.newest = Some(state.seq);
         for i in [0, 1] {
             pending.lists[i].put(views[i].clone(), mapped[i].take());
         }
         pending.state = Some(state.clone());
-        !std::mem::replace(&mut pending.scheduled, true)
+        Pushed {
+            current: true,
+            schedule: !std::mem::replace(&mut pending.scheduled, true),
+        }
     }
 
     /// Keeps `filter` for `mode`, which cancels a reveal not shown yet; its rows show once
@@ -233,6 +256,16 @@ impl SlintPublisher {
         }
     }
 
+    /// Pushes `state` into the pending slot and schedules a hop when one is not already on its
+    /// way. Returns whether `state` is current (at least as new as the newest state seen).
+    pub(crate) fn push_state(&self, state: &ViewState) -> bool {
+        let pushed = self.pending.push_state(state);
+        if pushed.schedule {
+            self.schedule();
+        }
+        pushed.current
+    }
+
     /// Loads `mode`'s console with `get_log`'s answer (`None` when it failed).
     pub(crate) fn load_log(&self, mode: PipelineMode, view: Option<LogView>) {
         if self.pending.load_log(mode, view) {
@@ -348,9 +381,7 @@ pub(crate) fn hop(pending: &Coalescer, edits: &Edits, window: &slint::Weak<App>)
 
 impl Publisher for SlintPublisher {
     fn state(&self, state: &ViewState) {
-        if self.pending.push_state(state) {
-            self.schedule();
-        }
+        self.push_state(state);
     }
 
     fn logs(&self, batch: &LogBatch) {
@@ -563,18 +594,56 @@ mod tests {
     #[test]
     fn a_burst_schedules_one_hop_that_takes_the_newest_state() {
         let pending = Coalescer::default();
-        assert!(pending.push_state(&state(1)));
-        assert!(!pending.push_state(&state(3)));
+        assert_eq!(
+            pending.push_state(&state(1)),
+            Pushed {
+                current: true,
+                schedule: true,
+            }
+        );
+        assert_eq!(
+            pending.push_state(&state(3)),
+            Pushed {
+                current: true,
+                schedule: false,
+            }
+        );
         // An older state never replaces a newer one.
-        assert!(!pending.push_state(&state(2)));
+        assert_eq!(
+            pending.push_state(&state(2)),
+            Pushed {
+                current: false,
+                schedule: false,
+            }
+        );
 
         let taken = pending.take();
         assert_eq!(taken.state.map(|s| s.seq), Some(3));
-        // Nothing is left, and an older state after the take is still dropped.
-        assert!(!pending.push_state(&state(2)));
+        // Nothing is left: an older state is dropped and not current; an equally new state is
+        // dropped as a duplicate yet still current.
+        assert_eq!(
+            pending.push_state(&state(2)),
+            Pushed {
+                current: false,
+                schedule: false,
+            }
+        );
+        assert_eq!(
+            pending.push_state(&state(3)),
+            Pushed {
+                current: true,
+                schedule: false,
+            }
+        );
         assert_eq!(pending.take().state.map(|s| s.seq), None);
         // A newer one after the take schedules its own hop.
-        assert!(pending.push_state(&state(4)));
+        assert_eq!(
+            pending.push_state(&state(4)),
+            Pushed {
+                current: true,
+                schedule: true,
+            }
+        );
         assert_eq!(pending.take().state.map(|s| s.seq), Some(4));
     }
 }
