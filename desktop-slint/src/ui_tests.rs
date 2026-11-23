@@ -6297,5 +6297,21 @@ fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
         0,
         "a row reset under a resting pointer hides the card"
     );
+
+    // Under To do, a hovered row that is done is patched hidden (no reset): its area goes too.
+    let todo = titled_row("Show - 02.mkv", "Encoding audio track");
+    publisher.show(&todo);
+    publisher.show_filter(Mode::Remux, QueueFilter::Todo);
+    frame(&app);
+    show_tip();
+    let mut done = titled_row("Show - 02.mkv", "Encoding audio track");
+    Arc::make_mut(&mut done.remux.rows)[0].bucket = Some(Bucket::Done);
+    publisher.show(&done);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "a row patched hidden under a resting pointer hides the card"
+    );
     app.hide().unwrap();
 }

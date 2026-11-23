@@ -502,9 +502,15 @@ fn apply(app: &App, mode: Mode, update: Update) {
                 let current = app.global::<Focus>().get_current();
                 let focused = focused_row(&current, mode);
                 let mut dropped = false;
+                let mut hidden = false;
                 for (index, row) in rows {
                     dropped |= !row.shown && focused == Some(row.id.as_str());
+                    // A shown row hidden: its controls go, a status tooltip's area with them.
+                    hidden |= !row.shown && model.row_data(index).is_some_and(|old| old.shown);
                     model.set_row_data(index, row);
+                }
+                if hidden {
+                    app.global::<Tip>().invoke_hide();
                 }
                 if dropped {
                     app.invoke_focus_keys();
