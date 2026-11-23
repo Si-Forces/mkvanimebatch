@@ -2,7 +2,7 @@
 // .pill-btn, .stack, .status-pill, .modal-card). Layout and bindings only: the host
 // (desktop-slint/src/jobs.rs) maps every text, count, width and tone from the published controls.
 import { GlassPane, Theme } from "theme.slint";
-import { Pressable, TipArea } from "focus.slint";
+import { Pressable, Tip, TipArea } from "focus.slint";
 
 // The status pill's style (presentation.rs `StatusPill::class`).
 export enum StatusTone { idle, running, success, error, cancelled }
@@ -243,6 +243,13 @@ export component BottomBar inherits Rectangle {
         }
     }
     property <bool> wide: root.width >= 900px;
+    property <string> chips-tip: "Workers and disk I/O jobs: the engine's defaults, or the running batch's own";
+    // The chips go under a resting pointer too (a window snapped narrower): their card with them.
+    changed wide => {
+        if !self.wide {
+            Tip.leave(self.chips-tip);
+        }
+    }
     height: bar.preferred-height;
     background: Theme.side;
     Rectangle {
@@ -305,7 +312,7 @@ export component BottomBar inherits Rectangle {
         }
         // .bar-chips: hidden under 900px.
         if root.wide: chip-block := Rectangle {
-            property <string> tip: "Workers and disk I/O jobs: the engine's defaults, or the running batch's own";
+            property <string> tip: root.chips-tip;
             width: chips.preferred-width;
             accessible-role: groupbox;
             accessible-description: self.tip;

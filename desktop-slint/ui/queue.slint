@@ -481,6 +481,7 @@ component EpRow inherits Rectangle {
                     // pointer hides its card (an `if` would destroy the area and leave it shown).
                     TipArea {
                         tip: root.item.title;
+                        owner: "status:" + root.key;
                     }
                 }
 

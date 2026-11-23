@@ -408,6 +408,22 @@ fn focused_row(current: &str, mode: Mode) -> Option<&str> {
         .flatten()
 }
 
+/// Hides the hover tooltip when `removed` names its area (`Tip.owner`): Slint destroys an area
+/// without a leave, so its card would stay under a resting pointer. An owner is
+/// `status:<mode>:<row id>` (a row's status, `status_prefix` and the id), `rung` (a subtitle
+/// rung) or "" (an area no publication removes).
+fn hide_tip_of(app: &App, removed: impl Fn(&str) -> bool) {
+    let tip = app.global::<Tip>();
+    if removed(&tip.get_owner()) {
+        tip.invoke_hide();
+    }
+}
+
+/// The start of `mode`'s row status owners (`Tip.owner`), queue.slint's `"status:" + key`.
+fn status_prefix(mode: Mode) -> String {
+    format!("status:{}:", name(mode))
+}
+
 /// Writes `mode`'s update: its header when it changed, its rows into the mode's model, its Library
 /// and Inspector when they changed, then scrolls to a revealed release. A card that replaced the
 /// rows, or another folder's view, since the last hop puts the list back at the top, as the
@@ -454,7 +470,7 @@ fn apply(app: &App, mode: Mode, update: Update) {
         // shown until now, which is set below.
         if let Some(subtitles) = update.subtitles {
             // A new ladder makes its rungs again: a rung's tooltip would outlive its area.
-            app.global::<Tip>().invoke_hide();
+            hide_tip_of(app, |owner| owner == "rung");
             app.set_sub_ladder(ModelRc::new(VecModel::from(subtitles.ladder)));
             app.set_sub_options(ModelRc::new(VecModel::from(subtitles.options)));
             app.set_sub_values(ModelRc::new(VecModel::from(subtitles.values)));
@@ -488,7 +504,8 @@ fn apply(app: &App, mode: Mode, update: Update) {
                 let dropped = dropped.is_some();
                 // The rows are made again: a row's tooltip would outlive its area, which Slint
                 // destroys without a leave, until the pointer next moved.
-                app.global::<Tip>().invoke_hide();
+                let prefix = status_prefix(mode);
+                hide_tip_of(app, |owner| owner.starts_with(&prefix));
                 model.set_vec(rows);
                 app.invoke_unpin(mode);
                 if dropped {
@@ -502,16 +519,18 @@ fn apply(app: &App, mode: Mode, update: Update) {
                 let current = app.global::<Focus>().get_current();
                 let focused = focused_row(&current, mode);
                 let mut dropped = false;
-                let mut hidden = false;
+                let mut hidden_owners = Vec::new();
                 for (index, row) in rows {
                     dropped |= !row.shown && focused == Some(row.id.as_str());
                     // A shown row hidden: its controls go, a status tooltip's area with them.
-                    hidden |= !row.shown && model.row_data(index).is_some_and(|old| old.shown);
+                    if !row.shown && model.row_data(index).is_some_and(|old| old.shown) {
+                        hidden_owners.push(format!("{}{}", status_prefix(mode), row.id));
+                    }
                     model.set_row_data(index, row);
                 }
-                if hidden {
-                    app.global::<Tip>().invoke_hide();
-                }
+                hide_tip_of(app, |owner| {
+                    hidden_owners.iter().any(|hidden| hidden == owner)
+                });
                 if dropped {
                     app.invoke_focus_keys();
                 }

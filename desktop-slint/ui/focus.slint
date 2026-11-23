@@ -76,12 +76,16 @@ export global Tip {
     in-out property <length> owner-y;
     in-out property <int> serial;
     in-out property <bool> visible;
+    // Which area shows it (`TipArea.owner`, "" for an unnamed one): the host hides the card of an
+    // area a publication removes, and no other.
+    in-out property <string> owner;
 
-    public function hover(text: string, x: length, y: length) {
+    public function hover(text: string, owner: string, x: length, y: length) {
         if text == "" {
             self.hide();
             return;
         }
+        self.owner = owner;
         self.owner-x = x;
         self.owner-y = y;
         if self.visible && self.text == text {
@@ -109,6 +113,7 @@ export global Tip {
     public function hide() {
         self.visible = false;
         self.text = "";
+        self.owner = "";
     }
 }
 
@@ -132,7 +137,7 @@ export component TipCard inherits Rectangle {
     property <length> below-y: self.pointer-y + self.cursor-gap;
 
     x: clamp(self.pointer-x - self.card-width / 2, self.edge-margin, self.max-x);
-    y: self.below-y + self.card-height <= self.window-height
+    y: self.below-y + self.card-height <= self.window-height - self.edge-margin
         ? self.below-y
         : max(self.edge-margin, self.pointer-y - self.card-height - self.edge-margin);
     width: self.card-width;
@@ -158,6 +163,8 @@ export component TipCard inherits Rectangle {
 // the control as its parent instead (as Field does), or place it only over non-interactive content.
 export component TipArea inherits TouchArea {
     in property <string> tip;
+    // Names the area for the host (`Tip.owner`): set where a publication can remove it.
+    in property <string> owner;
     in property <bool> tip-quiet;
     property <bool> press-quiet;
     enabled: root.tip != "";
@@ -169,7 +176,7 @@ export component TipArea inherits TouchArea {
 
     function sync-tip() {
         if self.has-hover && !root.tip-quiet && !self.press-quiet && root.tip != "" {
-            Tip.hover(root.tip, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            Tip.hover(root.tip, root.owner, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
         }
     }
 
@@ -327,8 +334,9 @@ export component Pressable inherits Rectangle {
     }
     // A disabled TouchArea reports no hover; keep the tooltip and not-allowed cursor (style.css
     // `button:disabled`) active for disabled buttons (e.g. Run remux before a folder is open).
-    if !root.enabled && root.tip != "": TipArea {
-        tip: root.tip;
+    // Always made, off while enabled: a button enabled under a resting pointer hides the card.
+    TipArea {
+        tip: root.enabled ? "" : root.tip;
         mouse-cursor: not-allowed;
     }
     @children
@@ -617,10 +625,12 @@ export component Slider inherits Rectangle {
     touch := TouchArea {
         enabled: root.live;
         // style.css sets cursor: pointer on buttons only, not input[type="range"].
-        mouse-cursor: root.enabled ? MouseCursor.default : not-allowed;
+        mouse-cursor: MouseCursor.default;
         property <bool> dragging;
         // A pointer step of this drag changed the value.
         property <bool> stepped;
+        // Where the pointer was last sampled: a release elsewhere (a touch) is a last step.
+        property <length> sampled-x;
         out property <bool> tip-quiet;
         changed has-hover => {
             if !self.has-hover && !self.dragging {
@@ -643,16 +653,26 @@ export component Slider inherits Rectangle {
                 keys.focus();
                 self.tip-quiet = true;
                 self.dragging = true;
+                self.sampled-x = self.mouse-x;
                 self.stepped = root.set-stepped(root.value-at(self.mouse-x));
             } else if event.kind == PointerEventKind.up {
+                // Only a moved release steps: the value a form publication set stays otherwise.
+                if self.dragging && self.mouse-x != self.sampled-x {
+                    self.stepped = root.set-stepped(root.value-at(self.mouse-x)) || self.stepped;
+                }
                 root.end-drag(true);
             }
         }
         moved => {
+            self.sampled-x = self.mouse-x;
             if self.dragging && root.live && root.set-stepped(root.value-at(self.mouse-x)) {
                 self.stepped = true;
             }
         }
+    }
+    // A disabled TouchArea sets no cursor: style.css `input:disabled { cursor: not-allowed }`.
+    if !root.enabled && root.layer >= Focus.modal: TouchArea {
+        mouse-cursor: not-allowed;
     }
 
     if root.ring: FocusRing {

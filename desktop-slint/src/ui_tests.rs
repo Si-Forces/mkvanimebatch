@@ -87,6 +87,17 @@ fn traffic_light_gap(app: &App) -> slint::LogicalPosition {
     slint::LogicalPosition::new(at.x + size.width + 4.0, at.y + size.height / 2.0)
 }
 
+/// The mouse cursor the window shows now.
+fn mouse_cursor(app: &App) -> i_slint_core::cursor::MouseCursorInner {
+    use i_slint_backend_testing::testing_backend::TestingWindow;
+    let adapter = i_slint_core::window::WindowInner::from_pub(app.window()).window_adapter();
+    let window = adapter
+        .internal(i_slint_core::InternalToken)
+        .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
+        .expect("TestingWindow");
+    window.mouse_cursor()
+}
+
 /// The pointer moved to `at`, and the fades given time to end.
 fn hover_at(app: &App, at: slint::LogicalPosition) {
     app.window()
@@ -4864,10 +4875,8 @@ fn the_scanning_card_spins_a_26px_ring() {
 /// which style.css's `button { cursor: pointer }` covers.
 #[test]
 fn the_traffic_lights_and_the_steppers_show_the_pointer() {
-    use i_slint_backend_testing::testing_backend::TestingWindow;
     use i_slint_core::cursor::MouseCursorInner;
     use i_slint_core::items::BuiltInMouseCursor;
-    use i_slint_core::window::WindowInner;
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window()
@@ -4882,13 +4891,8 @@ fn the_traffic_lights_and_the_steppers_show_the_pointer() {
             &app,
             slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0),
         );
-        let adapter = WindowInner::from_pub(app.window()).window_adapter();
-        let window = adapter
-            .internal(i_slint_core::InternalToken)
-            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
-            .unwrap();
         matches!(
-            window.mouse_cursor(),
+            mouse_cursor(&app),
             MouseCursorInner::BuiltIn(BuiltInMouseCursor::Pointer)
         )
     };
@@ -5201,11 +5205,9 @@ fn glass_pane_near_shadow_keeps_full_strength_under_translucent_fills() {
 /// its 16px box in `Theme.accent` when checked.
 #[test]
 fn custom_checkboxes_toggle_with_space_and_report_accessibility() {
-    use i_slint_backend_testing::testing_backend::TestingWindow;
     use i_slint_backend_testing::AccessibleRole;
     use i_slint_core::cursor::MouseCursorInner;
     use i_slint_core::items::BuiltInMouseCursor;
-    use i_slint_core::window::WindowInner;
     use slint::platform::Key;
     init_software_renderer();
     let app = new_app();
@@ -5298,12 +5300,7 @@ fn custom_checkboxes_toggle_with_space_and_report_accessibility() {
     let cursor_at = |x: f32, y: f32| {
         hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
         hover_at(&app, slint::LogicalPosition::new(x, y));
-        let adapter = WindowInner::from_pub(app.window()).window_adapter();
-        let window = adapter
-            .internal(i_slint_core::InternalToken)
-            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
-            .expect("TestingWindow");
-        window.mouse_cursor()
+        mouse_cursor(&app)
     };
     let (bat, bsize) = (box_el.absolute_position(), box_el.size());
     assert_eq!(
@@ -5543,8 +5540,34 @@ fn custom_complexity_slider_handles_keys_drag_and_accessibility() {
         11,
         "locking mid-drag must end silently without committing"
     );
+    // The locked slider shows style.css `input:disabled`'s not-allowed cursor.
+    // Measured again: the lock moves the slider in the sheet.
+    let cursor_at = |frac: f32| {
+        let (at, size) = (slider.absolute_position(), slider.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        hover_at(
+            &app,
+            slint::LogicalPosition::new(
+                at.x + 8.0 + (size.width - 16.0) * frac,
+                at.y + size.height / 2.0,
+            ),
+        );
+        mouse_cursor(&app)
+    };
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    assert_eq!(
+        cursor_at(0.5),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "the locked slider shows not-allowed"
+    );
     apply(&app, &ViewState::new(None));
     frame(&app);
+    assert_eq!(
+        cursor_at(0.5),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::Default),
+        "the unlocked slider shows the default cursor"
+    );
     app.window()
         .dispatch_event(WindowEvent::PointerMoved { position: pos(0.9) });
     assert_eq!(
@@ -5552,6 +5575,26 @@ fn custom_complexity_slider_handles_keys_drag_and_accessibility() {
         Some("6"),
         "drag stays cleared after unlocking"
     );
+
+    // A release away from the last move (a touch's last position) is the drag's last step.
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos(0.6),
+        button: PointerEventButton::Left,
+    });
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: pos(0.7) });
+    assert_eq!(slider.accessible_value().as_deref(), Some("7"));
+    app.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos(0.8),
+        button: PointerEventButton::Left,
+    });
+    assert_eq!(
+        slider.accessible_value().as_deref(),
+        Some("8"),
+        "the release position is the last step"
+    );
+    assert_eq!(slid.borrow().last(), Some(&8.0));
+    assert_eq!(committed.borrow().len(), 12, "the drag commits once");
 
     // Out-of-range draft text in the complexity box ("15") stays "15" in the form while follow()
     // clamps the slider to 10: increment at the displayed maximum must emit neither slid nor
@@ -5805,10 +5848,8 @@ fn inspector_crumbs_show_path_tooltips_and_separate_chevron_texts() {
 /// `not-allowed` cursor on disabled buttons (`Run remux`).
 #[test]
 fn tooltips_place_below_cursor_centred_and_clamped_in_window() {
-    use i_slint_backend_testing::testing_backend::TestingWindow;
     use i_slint_core::cursor::MouseCursorInner;
     use i_slint_core::items::BuiltInMouseCursor;
-    use i_slint_core::window::WindowInner;
     init_software_renderer();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(920.0, 640.0));
@@ -5842,14 +5883,7 @@ fn tooltips_place_below_cursor_centred_and_clamped_in_window() {
             .next()
             .expect("visible TipCard")
     };
-    let cursor_now = || {
-        let adapter = WindowInner::from_pub(app.window()).window_adapter();
-        let window = adapter
-            .internal(i_slint_core::InternalToken)
-            .and_then(|internal| (internal as &dyn std::any::Any).downcast_ref::<TestingWindow>())
-            .expect("TestingWindow");
-        window.mouse_cursor()
-    };
+    let cursor_now = || mouse_cursor(&app);
 
     // Near the right window edge: card drops >= 20px below the cursor, right-edge clamp engages
     // (right == 912), and the gap under the cursor is untouched (no 18x12 ToolTipImpl box).
@@ -5942,8 +5976,10 @@ fn tooltips_place_below_cursor_centred_and_clamped_in_window() {
     );
 
     // Middle (Encoder complexity box in SettingsSheet): >= 20px below cursor, horizontally centred
-    // on the pointer, and single-line (not wrapped at 320px).
+    // on the pointer, and single-line (not wrapped at 320px). A taller window, so the box is
+    // more than a card and the 8px edge margin above the bottom edge.
     hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    app.window().set_size(slint::LogicalSize::new(920.0, 760.0));
     app.invoke_open_sheet(Mode::Remux, "".into());
     frame(&app);
     let cplx = only(&app, "Encoder complexity value");
@@ -5967,6 +6003,24 @@ fn tooltips_place_below_cursor_centred_and_clamped_in_window() {
         "complexity tooltip should stay on one line (> 320px wide, <= 32px tall), got {}x{}",
         cm_size.width,
         cm_size.height
+    );
+
+    // A card whose bottom would land inside the 8px bottom margin flips above the pointer.
+    let tip = app.global::<crate::Tip>();
+    tip.set_text("Edge margin".into());
+    tip.set_x(400.0);
+    tip.set_y(100.0);
+    tip.set_visible(true);
+    frame(&app);
+    let height = card().size().height;
+    // 4px from the 760px window's bottom edge, were it placed below.
+    let pointer_y = 760.0 - 24.0 - height - 4.0;
+    tip.set_y(pointer_y);
+    frame(&app);
+    let flipped = card();
+    assert!(
+        flipped.absolute_position().y + flipped.size().height <= pointer_y,
+        "a card 4px from the bottom edge flips above the pointer"
     );
     app.hide().unwrap();
 }
@@ -6063,32 +6117,39 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
     frame(&app);
     assert_eq!(tip_count(), 0, "wheel scroll hides shown tooltip");
 
-    // 2. Removing the hovered TipArea under a resting pointer (`if root.item.title != ""` flipping
-    // false, and a full row reset) must not leave a stuck card once the pointer moves or exits,
-    // and returning to the old pixel must not revive it.
+    // 2. A hovered TipArea removed without the publisher's hide (the rows model swapped
+    // directly, as a removal the publisher does not know about) leaves the card up while the
+    // pointer rests; the window-level watcher (`tip-stale-timer`) clears it ~100ms after the
+    // pointer next moves, or at once when it leaves the window, and returning to the old pixel
+    // does not revive it.
+    let clear_rows = || {
+        app.set_remux_rows(slint::ModelRc::new(slint::VecModel::<
+            mkv_anime_batch_slint_ui::QueueRow,
+        >::default()));
+        frame(&app);
+    };
     let row_pos = hover_el(&ring);
-    assert_eq!(tip_count(), 1, "row status tooltip shown before if-flip");
-    let mut no_title = state.clone();
-    no_title.remux.rows = Arc::new(vec![Row {
-        status: ItemStatus::Processing,
-        label: "Processing".into(),
-        title: String::new(),
-        tone: Tone::Info,
-        progress: Some(50.0),
-        ..row("Show - 01.mkv")
-    }]);
-    apply(&app, &no_title);
-    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "row status tooltip shown before its removal"
+    );
+    clear_rows();
     app.window().dispatch_event(WindowEvent::PointerMoved {
         position: slint::LogicalPosition::new(400.0, 300.0),
     });
     frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "the orphaned card stays until the stale debounce runs out"
+    );
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(120));
     frame(&app);
     assert_eq!(
         tip_count(),
         0,
-        "moving after conditional TipArea disappears hides the orphaned tooltip within ~100ms"
+        "moving after the hovered TipArea disappears hides the orphaned tooltip within ~100ms"
     );
     hover_pos(row_pos);
     assert_eq!(
@@ -6097,7 +6158,6 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
         "moving back to the removed TipArea's pixel does not revive the old tooltip"
     );
 
-    // Same if-flip followed by PointerExited (no move inside the window) also clears the orphaned tip.
     apply(&app, &state);
     frame(&app);
     let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
@@ -6107,10 +6167,14 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
     assert_eq!(
         tip_count(),
         1,
-        "row status tooltip shown before exit-after-if-flip"
+        "row status tooltip shown before exit-after-removal"
     );
-    apply(&app, &no_title);
-    frame(&app);
+    clear_rows();
+    assert_eq!(
+        tip_count(),
+        1,
+        "the orphaned card stays while the pointer rests"
+    );
     app.window().dispatch_event(WindowEvent::PointerExited);
     frame(&app);
     assert_eq!(
@@ -6118,35 +6182,8 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
         0,
         "PointerExited hides an orphaned tooltip after its TipArea disappeared"
     );
-
-    // Full row reset under a resting pointer also clears on move.
     apply(&app, &state);
     frame(&app);
-    let ring = ElementHandle::find_by_element_type_name(&app, "Ring")
-        .next()
-        .expect("row status Ring for reset");
-    let row_pos = hover_el(&ring);
-    assert_eq!(tip_count(), 1, "row status tooltip shown before row reset");
-    let empty_state = ViewState::new(None);
-    apply(&app, &empty_state);
-    frame(&app);
-    app.window().dispatch_event(WindowEvent::PointerMoved {
-        position: slint::LogicalPosition::new(400.0, 300.0),
-    });
-    frame(&app);
-    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(120));
-    frame(&app);
-    assert_eq!(
-        tip_count(),
-        0,
-        "moving after hovered row disappears hides the orphaned tooltip within ~100ms"
-    );
-    hover_pos(row_pos);
-    assert_eq!(
-        tip_count(),
-        0,
-        "moving back to the removed row's pixel does not revive the old tooltip"
-    );
 
     // 3. Direct move from tipped control A to tipped control B: stale leave(A) must not kill B.
     let close = only(&app, "Close window");
@@ -6228,7 +6265,10 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
 }
 
 /// A tooltip goes with its area even when the pointer does not move: a title that empties under
-/// it (the area stays, off) and a row reset (the area is destroyed) both hide the card at once.
+/// it (the area stays, off), a row reset or a row patched hidden (the area is destroyed), a
+/// disabled button enabled and the bar's chips going under 900px all hide the card at once; a
+/// removal hides only its own area's card (`Tip.owner`), so another control's card, another row's
+/// with the same title, and one over the other mode's update survive.
 #[test]
 fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
     init_software_renderer();
@@ -6312,6 +6352,122 @@ fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
         tip_count(),
         0,
         "a row patched hidden under a resting pointer hides the card"
+    );
+
+    // Another control's tooltip survives a patch that hides a row it does not belong to.
+    let hover_center = |el: &ElementHandle| {
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        let (at, size) = (el.absolute_position(), el.size());
+        app.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(
+                    at.x + size.width / 2.0,
+                    at.y + size.height / 2.0,
+                ),
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        frame(&app);
+    };
+    publisher.show(&titled_row("Show - 02.mkv", "Encoding audio track"));
+    frame(&app);
+    hover_center(&only(&app, "Close window"));
+    assert_eq!(tip_count(), 1, "the Close window tooltip shows");
+    let mut done = titled_row("Show - 02.mkv", "Encoding audio track");
+    Arc::make_mut(&mut done.remux.rows)[0].bucket = Some(Bucket::Done);
+    publisher.show(&done);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "a row patched hidden keeps another control's tooltip"
+    );
+
+    // Two rows with the same status title: hiding one keeps the other's card, as the card's
+    // owner is a row, not a text.
+    let same_titles = |second_done: bool| {
+        let mut state = titled_row("Show - 03.mkv", "Cancelled");
+        let mut second = state.remux.rows[0].clone();
+        second.id = "Show - 04.mkv".into();
+        if second_done {
+            second.bucket = Some(Bucket::Done);
+        }
+        Arc::make_mut(&mut state.remux.rows).push(second);
+        state
+    };
+    publisher.show(&same_titles(false));
+    frame(&app);
+    hover_center(
+        &ElementHandle::find_by_element_type_name(&app, "Ring")
+            .next()
+            .expect("the first row's Ring"),
+    );
+    assert_eq!(tip_count(), 1, "the first row's status tooltip shows");
+    publisher.show(&same_titles(true));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "hiding a row with the same title keeps the hovered row's card"
+    );
+
+    // A reset of the shown mode's rows (another folder's) keeps another control's card.
+    hover_center(&only(&app, "Close window"));
+    assert_eq!(tip_count(), 1, "the Close window tooltip shows");
+    publisher.show(&titled_row("Show - 05.mkv", "Encoding audio track"));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "a row reset keeps another control's tooltip"
+    );
+
+    // The other mode's reset keeps the shown mode's row card.
+    let mut extract = titled_row("Show - 05.mkv", "Encoding audio track");
+    hover_center(
+        &ElementHandle::find_by_element_type_name(&app, "Ring")
+            .next()
+            .expect("the remux row's Ring"),
+    );
+    assert_eq!(tip_count(), 1, "the remux row's status tooltip shows");
+    extract.extract.rows = Arc::new(vec![row("Other.mkv")]);
+    extract.extract.empty = None;
+    publisher.show(&extract);
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "extract's row reset keeps the remux row's card"
+    );
+
+    // Disabled Run's tooltip goes when Run is enabled under a resting pointer.
+    let mut disabled = titled("Encoding audio track");
+    disabled.remux.controls.run_disabled = true;
+    disabled.remux.controls.run_title = "Open a folder with episodes first".into();
+    publisher.show(&disabled);
+    publisher.show_filter(Mode::Remux, QueueFilter::All);
+    frame(&app);
+    hover_center(&only(&app, "Run remux"));
+    assert_eq!(tip_count(), 1, "disabled Run shows why");
+    publisher.show(&titled("Encoding audio track"));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "Run enabled under a resting pointer hides its disabled tooltip"
+    );
+
+    // The bar's chips go under 900px with the pointer resting on them (a window snapped narrower).
+    let chips = ElementHandle::find_by_element_id(&app, "BottomBar::chip-block")
+        .next()
+        .expect("the bar's chips at 920px");
+    hover_center(&chips);
+    assert_eq!(tip_count(), 1, "the chips' tooltip shows");
+    app.window().set_size(slint::LogicalSize::new(860.0, 640.0));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        0,
+        "the chips removed under a resting pointer hide their card"
     );
     app.hide().unwrap();
 }

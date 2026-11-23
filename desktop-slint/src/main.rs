@@ -328,20 +328,26 @@ fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Tim
     let mut pending = save;
     let pressed = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
-        // Any left press, on a fluent widget or a blank area too, hides the ring until a key
-        // (`Focus.keyboard`, :focus-visible) and dismisses any hover tooltip like a browser.
+        // Any press, on a fluent widget or a blank area too, dismisses any hover tooltip like a
+        // browser (a right press opens a field's context menu), as do the pointer leaving, a
+        // wheel and the window losing the focus. A left press also hides the ring until a key
+        // (`Focus.keyboard`, :focus-visible).
         match event {
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button,
                 ..
             } => {
                 if let Some(app) = pressed.upgrade() {
-                    app.global::<Focus>().set_keyboard(false);
+                    if *button == MouseButton::Left {
+                        app.global::<Focus>().set_keyboard(false);
+                    }
                     app.global::<Tip>().invoke_hide();
                 }
             }
-            WindowEvent::CursorLeft { .. } | WindowEvent::MouseWheel { .. } => {
+            WindowEvent::CursorLeft { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::Focused(false) => {
                 if let Some(app) = pressed.upgrade() {
                     app.global::<Tip>().invoke_hide();
                 }
