@@ -400,7 +400,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::clone(&in_flight),
         move |state, resetting| {
             let start = Instant::now();
-            let scheduled = pending.push_state(state);
+            let scheduled = pending.push_state(state).schedule;
             mapped.lock().unwrap().push(ms(start.elapsed()));
             // Published only with no hop in flight, so the reset always schedules its own hop.
             debug_assert!(scheduled || !resetting);

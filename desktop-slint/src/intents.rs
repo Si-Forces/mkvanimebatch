@@ -9,7 +9,7 @@ use crate::inspector::{capped_tag, restore_form, typed_fields, SUBTITLE_FILTER};
 use crate::publisher::SlintPublisher;
 use mkv_anime_batch_slint_ui::{App, Mode};
 use mkv_core::pipeline::PipelineMode;
-use mkv_desktop_core::actor::{CoreHandle, Intent, Publisher, ViewState};
+use mkv_desktop_core::actor::{CoreHandle, Intent, ViewState};
 use mkv_desktop_core::queue::Direction;
 use slint::{ComponentHandle, Model, SharedString};
 use std::collections::VecDeque;
@@ -36,12 +36,15 @@ pub(crate) fn show_boot_mode(app: &App, state: &ViewState) {
     }
 }
 
-/// Applies the initial View State read from `core.state()` at boot: switches to extract if a
-/// start or job already holds it, and pushes the state through `publisher` (whose `seq` guard
-/// drops it if a state as new or newer already arrived).
+/// Applies the initial View State read from `core.state()` at boot: pushes the state through
+/// `publisher` (whose `seq` guard drops a duplicate or older state), and switches to extract when
+/// the boot state is current (not strictly older than the newest state seen, since `core.state()`
+/// shares the last publication's `seq`) and a start or job holds extract.
 pub(crate) fn apply_boot_state(app: &App, publisher: &SlintPublisher, state: &ViewState) {
-    show_boot_mode(app, state);
-    publisher.state(state);
+    let current = publisher.push_state(state);
+    if current {
+        show_boot_mode(app, state);
+    }
 }
 
 /// What runs once an Intent is answered, kept while the Intent waits behind a clear.
@@ -803,5 +806,36 @@ pub(crate) mod tests {
         apply_boot_state(&app, &publisher, &stale);
         publisher.flush();
         assert_eq!(app.get_remux_head().title, "Newer title");
+    }
+
+    #[test]
+    fn stale_boot_state_does_not_switch_mode_to_extract() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = App::new().unwrap();
+        crate::publisher::install_models(&app);
+        let publisher = SlintPublisher::new(&app);
+
+        // A newer Remux publication with no extract job has already landed.
+        let mut newer = ViewState::new(None);
+        newer.seq = 2;
+        publisher.show(&newer);
+        assert_eq!(app.get_mode(), Mode::Remux);
+
+        // An older boot state whose run mode is extract is stale and must not switch modes.
+        let mut older = ViewState::new(None);
+        older.seq = 1;
+        older.run.mode = Some(PipelineMode::Extract);
+        apply_boot_state(&app, &publisher, &older);
+        assert_eq!(app.get_mode(), Mode::Remux);
+
+        // `core.state()` answers the last publication itself: that duplicate is not re-applied,
+        // yet it is still current and switches to Extract (a publication alone does not).
+        let mut last = ViewState::new(None);
+        last.seq = 3;
+        last.run.mode = Some(PipelineMode::Extract);
+        publisher.show(&last);
+        assert_eq!(app.get_mode(), Mode::Remux);
+        apply_boot_state(&app, &publisher, &last);
+        assert_eq!(app.get_mode(), Mode::Extract);
     }
 }

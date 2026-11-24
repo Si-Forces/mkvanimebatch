@@ -233,16 +233,12 @@ component Field inherits Rectangle {
     in property <string> label;
     in property <bool> required;
     in property <string> tip;
-    // Suppresses the hover tooltip while an inner control (the complexity slider) is pressed or
-    // dragged and until the pointer leaves it, matching a browser's `title` tooltip.
-    in property <bool> tip-quiet;
     // Columns of fields share the width evenly (.grid-2, .grid-3).
     min-width: 0px;
     preferred-width: 0px;
     horizontal-stretch: 1;
     TipArea {
         tip: root.tip;
-        tip-quiet: root.tip-quiet;
         VerticalLayout {
             spacing: 4px;
             HorizontalLayout {
@@ -760,7 +756,6 @@ export component SettingsSheet inherits GlassPane {
                             Field {
                                 label: "Encoder complexity";
                                 tip: root.limits.complexity-tip;
-                                tip-quiet: complexity-slider.tip-quiet;
                                 HorizontalLayout {
                                     spacing: 6px;
                                     Rectangle {

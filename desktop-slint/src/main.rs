@@ -26,7 +26,7 @@ use mkv_desktop_core::control::{
 use mkv_desktop_core::job::JobState;
 use publisher::SlintPublisher;
 use renderer::{Answer, Choice, GpuStart, Renderer};
-use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
+use slint::winit_030::winit::event::{ElementState, MouseButton, Touch, TouchPhase, WindowEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, RenderingState, Timer};
 use std::cell::Cell;
@@ -305,9 +305,140 @@ fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
 /// nothing there and is not skipped. A minimize is seen up to this late.
 const MINIMIZED_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The winit window events that affect the hover tooltip or the keyboard-focus ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowTipEvent {
+    MousePress { left: bool },
+    Release,
+    CursorLeft,
+    MouseWheel,
+    FocusLost,
+    Other,
+}
+
+impl WindowTipEvent {
+    fn from_winit(event: &WindowEvent) -> Self {
+        match event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => Self::MousePress {
+                left: *button == MouseButton::Left,
+            },
+            // Slint turns a finger's touch into a left press, but winit sends it as `Touch`.
+            WindowEvent::Touch(Touch {
+                phase: TouchPhase::Started,
+                ..
+            }) => Self::MousePress { left: true },
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                ..
+            }
+            | WindowEvent::Touch(Touch {
+                phase: TouchPhase::Ended | TouchPhase::Cancelled,
+                ..
+            }) => Self::Release,
+            WindowEvent::CursorLeft { .. } => Self::CursorLeft,
+            WindowEvent::MouseWheel { .. } => Self::MouseWheel,
+            WindowEvent::Focused(false) => Self::FocusLost,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// What a [`WindowTipEvent`] asks of `Tip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TipEffect {
+    None,
+    /// Hide any shown card without latching `press-quiet`.
+    Hide,
+    /// Hide any shown card and latch `press-quiet` on hovered areas, and on areas entered until
+    /// the release.
+    Press,
+    /// End the press: areas entered after it show their cards again.
+    Release,
+}
+
+/// What a [`WindowTipEvent`] asks of `Focus.keyboard` and `Tip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowTipAction {
+    clear_keyboard: bool,
+    tip: TipEffect,
+}
+
+/// Decides how a winit window event updates `Focus.keyboard` and `Tip`: any mouse press or touch
+/// dismisses the hover tooltip and latches `press-quiet`, until the pointer leaves, on hovered areas
+/// and on areas entered before its release (a left press also hides the keyboard-focus ring); the
+/// pointer leaving, a wheel and losing focus dismiss the tooltip.
+fn window_tip_action(event: WindowTipEvent) -> WindowTipAction {
+    match event {
+        WindowTipEvent::MousePress { left } => WindowTipAction {
+            clear_keyboard: left,
+            tip: TipEffect::Press,
+        },
+        WindowTipEvent::CursorLeft | WindowTipEvent::MouseWheel | WindowTipEvent::FocusLost => {
+            WindowTipAction {
+                clear_keyboard: false,
+                tip: TipEffect::Hide,
+            }
+        }
+        WindowTipEvent::Release => WindowTipAction {
+            clear_keyboard: false,
+            tip: TipEffect::Release,
+        },
+        WindowTipEvent::Other => WindowTipAction {
+            clear_keyboard: false,
+            tip: TipEffect::None,
+        },
+    }
+}
+
+/// Applies a [`WindowTipAction`] to `app` — the single production source of `Tip.pressed()`,
+/// called from `watch_window`'s winit filter and mirrored by `ui_tests` (whose testing backend
+/// has no winit).
+fn apply_window_tip_action(app: &App, action: WindowTipAction) {
+    if action.clear_keyboard {
+        app.global::<Focus>().set_keyboard(false);
+    }
+    match action.tip {
+        TipEffect::None => {}
+        TipEffect::Hide => app.global::<Tip>().invoke_hide(),
+        TipEffect::Press => app.global::<Tip>().invoke_pressed(),
+        TipEffect::Release => app.global::<Tip>().invoke_released(),
+    }
+}
+
+/// Mirrors `watch_window`'s winit left-press notification for headless `ui_tests`, which run
+/// without winit.
+#[cfg(test)]
+pub(crate) fn notify_window_press(app: &App) {
+    apply_window_tip_action(
+        app,
+        window_tip_action(WindowTipEvent::MousePress { left: true }),
+    );
+}
+
+/// Mirrors `watch_window`'s winit release notification for headless `ui_tests`.
+#[cfg(test)]
+pub(crate) fn notify_window_release(app: &App) {
+    apply_window_tip_action(app, window_tip_action(WindowTipEvent::Release));
+}
+
+fn handle_window_tip_event(window: &slint::Weak<App>, event: &WindowEvent) {
+    let action = window_tip_action(WindowTipEvent::from_winit(event));
+    if action.clear_keyboard || action.tip != TipEffect::None {
+        if let Some(app) = window.upgrade() {
+            apply_window_tip_action(&app, action);
+        }
+    }
+}
+
 /// Watches winit's window events, through Slint's one window event filter:
 ///
 /// - Clears `Focus.keyboard` on any left press, so a later programmatic focus draws no ring.
+/// - Hides the hover tooltip on `CursorLeft`, wheel and focus loss, and hides and latches it on
+///   any mouse press or touch ([`window_tip_action`]).
 /// - Tells the core whether the window shows (`Intent::ViewVisible`), so it samples no telemetry
 ///   while hidden (`telemetry::Visibility`); the returned timer polls `is_minimized` and must be
 ///   kept.
@@ -328,32 +459,7 @@ fn watch_window(app: &App, save: Option<PathBuf>, send: intents::Intents) -> Tim
     let mut pending = save;
     let pressed = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
-        // Any press, on a fluent widget or a blank area too, dismisses any hover tooltip like a
-        // browser (a right press opens a field's context menu), as do the pointer leaving, a
-        // wheel and the window losing the focus. A left press also hides the ring until a key
-        // (`Focus.keyboard`, :focus-visible).
-        match event {
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
-                if let Some(app) = pressed.upgrade() {
-                    if *button == MouseButton::Left {
-                        app.global::<Focus>().set_keyboard(false);
-                    }
-                    app.global::<Tip>().invoke_hide();
-                }
-            }
-            WindowEvent::CursorLeft { .. }
-            | WindowEvent::MouseWheel { .. }
-            | WindowEvent::Focused(false) => {
-                if let Some(app) = pressed.upgrade() {
-                    app.global::<Tip>().invoke_hide();
-                }
-            }
-            _ => {}
-        }
+        handle_window_tip_event(&pressed, event);
         // The borrow ends before `told` sends.
         let change = seen.borrow_mut().event(event);
         told(change);
@@ -459,5 +565,109 @@ async fn centre(app: &App) {
             origin.x + offset(area.width, size.width),
             origin.y + offset(area.height, size.height),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_tip_event_decisions_match_winit_rules() {
+        assert_eq!(
+            window_tip_action(WindowTipEvent::MousePress { left: true }),
+            WindowTipAction {
+                clear_keyboard: true,
+                tip: TipEffect::Press,
+            }
+        );
+        assert_eq!(
+            window_tip_action(WindowTipEvent::MousePress { left: false }),
+            WindowTipAction {
+                clear_keyboard: false,
+                tip: TipEffect::Press,
+            }
+        );
+        for event in [
+            WindowTipEvent::CursorLeft,
+            WindowTipEvent::MouseWheel,
+            WindowTipEvent::FocusLost,
+        ] {
+            assert_eq!(
+                window_tip_action(event),
+                WindowTipAction {
+                    clear_keyboard: false,
+                    tip: TipEffect::Hide,
+                },
+                "{event:?} hides the tooltip without latching or clearing keyboard focus"
+            );
+        }
+        assert_eq!(
+            window_tip_action(WindowTipEvent::Release),
+            WindowTipAction {
+                clear_keyboard: false,
+                tip: TipEffect::Release,
+            }
+        );
+        assert_eq!(
+            window_tip_action(WindowTipEvent::Other),
+            WindowTipAction {
+                clear_keyboard: false,
+                tip: TipEffect::None,
+            }
+        );
+        // `MouseInput`, `Touch`, `CursorLeft` and `MouseWheel` carry winit's `DeviceId`, whose only
+        // constructor (`DeviceId::dummy`) is `unsafe` and forbidden workspace-wide.
+        assert_eq!(
+            WindowTipEvent::from_winit(&WindowEvent::Focused(false)),
+            WindowTipEvent::FocusLost
+        );
+        assert_eq!(
+            WindowTipEvent::from_winit(&WindowEvent::Focused(true)),
+            WindowTipEvent::Other
+        );
+        assert_eq!(
+            WindowTipEvent::from_winit(&WindowEvent::RedrawRequested),
+            WindowTipEvent::Other
+        );
+    }
+
+    #[test]
+    fn window_tip_actions_update_the_ring_and_the_card() {
+        i_slint_backend_testing::init_no_event_loop();
+        let app = App::new().unwrap();
+        let (focus, tip) = (app.global::<Focus>(), app.global::<Tip>());
+        // (event, ring kept, press-serial after it, held after it, card kept)
+        let cases = [
+            (
+                WindowTipEvent::MousePress { left: true },
+                false,
+                1,
+                true,
+                false,
+            ),
+            (WindowTipEvent::Release, true, 1, false, true),
+            (
+                WindowTipEvent::MousePress { left: false },
+                true,
+                2,
+                true,
+                false,
+            ),
+            (WindowTipEvent::CursorLeft, true, 2, true, false),
+            (WindowTipEvent::MouseWheel, true, 2, true, false),
+            (WindowTipEvent::FocusLost, true, 2, true, false),
+            (WindowTipEvent::Other, true, 2, true, true),
+        ];
+        for (event, keyboard, serial, held, visible) in cases {
+            focus.set_keyboard(true);
+            tip.set_text("tip".into());
+            tip.set_visible(true);
+            apply_window_tip_action(&app, window_tip_action(event));
+            assert_eq!(tip.get_visible(), visible, "{event:?} card");
+            assert_eq!(focus.get_keyboard(), keyboard, "{event:?} ring");
+            assert_eq!(tip.get_press_serial(), serial, "{event:?} press-serial");
+            assert_eq!(tip.get_held(), held, "{event:?} held");
+        }
     }
 }

@@ -448,6 +448,7 @@ export component App inherits Window {
     }
 
     // The Library and Inspector of the mode shown.
+    property <string> mode-name: root.mode == Mode.remux ? "remux" : "extract";
     property <[LibraryItem]> library: root.mode == Mode.remux ? root.remux-library : root.extract-library;
     // style.css's .panes columns: narrower panes in a narrower window.
     property <length> side-width: root.width >= 1180px ? 220px : root.width >= 980px ? 200px : 196px;
@@ -692,6 +693,7 @@ export component App inherits Window {
                                     spacing: 2px;
                                     for item in root.library: LibraryEntry {
                                         item: item;
+                                        tip-owner: "library:" + root.mode-name;
                                         clicked => {
                                             root.leave-field();
                                             root.reveal-release(item.release, item.root);
@@ -827,6 +829,7 @@ export component App inherits Window {
                     // The Episode Inspector (.insp) of the mode shown; the subtitle section is remux's.
                     insp-pane := InspectorPane {
                         width: root.insp-width;
+                        name: root.mode-name;
                         insp: root.mode == Mode.remux ? root.remux-inspector : root.extract-inspector;
                         ladder: root.sub-ladder;
                         options: root.sub-options;
