@@ -129,6 +129,16 @@ fn press_left_at(app: &App, position: slint::LogicalPosition) {
         });
 }
 
+/// Sends a left mouse release through `watch_window`'s winit mirror and Slint, as `press_left_at`.
+fn release_left_at(app: &App, position: slint::LogicalPosition) {
+    crate::notify_window_release(app);
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        });
+}
+
 /// The traffic lights' glyphs light while the pointer is anywhere over the group, the gaps
 /// between the lights included (.traffic-lights:hover), and go out away from it.
 #[test]
@@ -1173,7 +1183,7 @@ fn the_number_fields_and_the_complexity_show_their_tooltips_on_hover() {
 /// returns, matching a browser's `title` tooltip.
 #[test]
 fn complexity_slider_press_hides_field_tooltip_until_pointer_leaves() {
-    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::platform::WindowEvent;
     i_slint_backend_testing::init_no_event_loop();
     let app = new_app();
     app.window()
@@ -1190,12 +1200,7 @@ fn complexity_slider_press_hides_field_tooltip_until_pointer_leaves() {
     let center = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
     let outside = slint::LogicalPosition::new(1.0, 1.0);
 
-    let release_at = |position: slint::LogicalPosition| {
-        app.window().dispatch_event(WindowEvent::PointerReleased {
-            position,
-            button: PointerEventButton::Left,
-        });
-    };
+    let release_at = |position: slint::LogicalPosition| release_left_at(&app, position);
 
     // Plain hover shows the tooltip.
     hover_at(&app, outside);
@@ -6278,10 +6283,6 @@ fn tooltips_hide_on_removal_exit_key_press_scroll_and_view_changes() {
     app.hide().unwrap();
 }
 
-/// A tooltip goes with its area even when the pointer does not move: a title that empties under
-/// it (the area stays, off), a row reset or a row patched hidden (the area is destroyed), a
-/// disabled button enabled and the bar's chips going under 900px all hide the card at once; a
-/// removal hides only its own area's card (`Tip.owner`), so another control's card, another row's
 /// A hovered subtitle rung's card goes with the Inspector when a publication shows none (a scan
 /// that leaves no episodes stages no new ladder), with the pointer still.
 #[test]
@@ -6317,6 +6318,10 @@ fn a_rung_tooltip_hides_when_the_inspector_goes() {
     app.hide().unwrap();
 }
 
+/// A tooltip goes with its area even when the pointer does not move: a title that empties under
+/// it (the area stays, off), a row reset or a row patched hidden (the area is destroyed), a
+/// disabled button enabled and the bar's chips going under 900px all hide the card at once; a
+/// removal hides only its own area's card (`Tip.owner`), so another control's card, another row's
 /// with the same title, and one over the other mode's update survive.
 #[test]
 fn a_tooltip_hides_when_its_area_goes_under_a_resting_pointer() {
@@ -6793,7 +6798,7 @@ fn library_model_replacement_hides_library_tooltip() {
 /// re-enters; the child control still receives its press.
 #[test]
 fn field_number_box_press_latches_tooltip_until_pointer_leaves() {
-    use slint::platform::{PointerEventButton, WindowEvent};
+    use slint::platform::WindowEvent;
     init_software_renderer();
     let app = new_app();
     app.window()
@@ -6813,10 +6818,7 @@ fn field_number_box_press_latches_tooltip_until_pointer_leaves() {
 
     // Pressing the number box hides the card (via winit's press path) and still focuses the field.
     press_left_at(&app, center);
-    app.window().dispatch_event(WindowEvent::PointerReleased {
-        position: center,
-        button: PointerEventButton::Left,
-    });
+    release_left_at(&app, center);
     frame(&app);
     assert_eq!(tip_count(), 0, "pressing the number box hides the card");
     assert_eq!(
@@ -6843,6 +6845,91 @@ fn field_number_box_press_latches_tooltip_until_pointer_leaves() {
         tip_count(),
         1,
         "leaving and re-entering the field shows the card again"
+    );
+    app.hide().unwrap();
+}
+
+/// A press that lands as the pointer first enters a tipped Field still latches it. winit's filter
+/// sees the press before Slint flushes the buffered move into the Field, so an area entered while
+/// the button is held latches too (`Tip.held`).
+#[test]
+fn a_press_on_first_entry_into_a_field_latches_its_tooltip() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.seq = 1;
+    publisher.show(&state);
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let tip_count = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+    let workers = only(&app, "Workers");
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    let (at, size) = (workers.absolute_position(), workers.size());
+    let center = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    // winit's order: the filter's press first, then the buffered move, then the press itself.
+    crate::notify_window_press(&app);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    app.window().dispatch_event(WindowEvent::PointerPressed {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    release_left_at(&app, center);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(600));
+    frame(&app);
+    assert_eq!(tip_count(), 0, "the press hid the card");
+    // A move inside the Field re-shows the card unless the press latched it.
+    app.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(center.x + 1.0, center.y),
+    });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(600));
+    frame(&app);
+    assert_eq!(tip_count(), 0, "the press latched the Field it entered");
+    app.hide().unwrap();
+}
+
+/// A click released elsewhere latches no Field the pointer enters next, even when Slint flushes
+/// the move into it after both the press and the release (one winit batch).
+#[test]
+fn a_click_elsewhere_does_not_latch_the_field_entered_next() {
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.seq = 1;
+    publisher.show(&state);
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let tip_count = || ElementHandle::find_by_element_type_name(&app, "TipCard").count();
+    let centre = |el: &ElementHandle| {
+        let (at, size) = (el.absolute_position(), el.size());
+        slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0)
+    };
+    let (io, workers) = (
+        centre(&only(&app, "Disk I/O")),
+        centre(&only(&app, "Workers")),
+    );
+    hover_at(&app, io);
+    press_left_at(&app, io);
+    release_left_at(&app, io);
+    app.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: workers });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    frame(&app);
+    assert_eq!(
+        tip_count(),
+        1,
+        "the Field entered after the click shows its card"
     );
     app.hide().unwrap();
 }

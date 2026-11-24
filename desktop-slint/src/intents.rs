@@ -41,7 +41,8 @@ pub(crate) fn show_boot_mode(app: &App, state: &ViewState) {
 /// the boot state is current (not strictly older than the newest state seen, since `core.state()`
 /// shares the last publication's `seq`) and a start or job holds extract.
 pub(crate) fn apply_boot_state(app: &App, publisher: &SlintPublisher, state: &ViewState) {
-    if publisher.push_state(state) {
+    let current = publisher.push_state(state);
+    if current {
         show_boot_mode(app, state);
     }
 }
@@ -827,12 +828,14 @@ pub(crate) mod tests {
         apply_boot_state(&app, &publisher, &older);
         assert_eq!(app.get_mode(), Mode::Remux);
 
-        // An equally new boot state shares the last publication's seq (`core.state()`): the
-        // duplicate state is not re-applied, yet it is still current and switches to Extract.
-        let mut equal = ViewState::new(None);
-        equal.seq = 2;
-        equal.run.mode = Some(PipelineMode::Extract);
-        apply_boot_state(&app, &publisher, &equal);
+        // `core.state()` answers the last publication itself: that duplicate is not re-applied,
+        // yet it is still current and switches to Extract (a publication alone does not).
+        let mut last = ViewState::new(None);
+        last.seq = 3;
+        last.run.mode = Some(PipelineMode::Extract);
+        publisher.show(&last);
+        assert_eq!(app.get_mode(), Mode::Remux);
+        apply_boot_state(&app, &publisher, &last);
         assert_eq!(app.get_mode(), Mode::Extract);
     }
 }

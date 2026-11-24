@@ -80,14 +80,23 @@ export global Tip {
     // `rung`, `crumbs:<mode>`, `out-crumbs:<mode>`, `head-crumbs:<mode>`, or `library:<mode>`.
     // The host hides the card of an area a publication removes, and no other.
     in-out property <string> owner;
-    // Bumped on any mouse press by the host's winit window event filter (`main.rs`
+    // Bumped on any mouse press or touch by the host's winit window event filter (`main.rs`
     // `watch_window`, the single production source) so every hovered TipArea latches
     // `press-quiet` until the pointer leaves it.
     in-out property <int> press-serial;
+    // While a mouse button or a finger is down (the same filter): an area the pointer enters then
+    // latches too, since Slint may hit-test the press's move after the filter (a buffered move, a
+    // Flickable's delayed touch).
+    in-out property <bool> held;
 
     public function pressed() {
+        self.held = true;
         self.press-serial += 1;
         self.hide();
+    }
+
+    public function released() {
+        self.held = false;
     }
 
     public function hover(text: string, owner: string, x: length, y: length) {
@@ -197,6 +206,9 @@ export component TipArea inherits TouchArea {
     }
     changed has-hover => {
         if self.has-hover {
+            if Tip.held {
+                self.press-quiet = true;
+            }
             self.sync-tip();
         } else {
             self.press-quiet = false;
