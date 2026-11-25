@@ -6849,6 +6849,163 @@ fn field_number_box_press_latches_tooltip_until_pointer_leaves() {
     app.hide().unwrap();
 }
 
+/// A card shown from a Field's label covers the control below it; moving the pointer onto the card
+/// hides it at once and shows it again below the pointer once it rests there.
+#[test]
+fn the_pointer_moving_onto_a_field_tooltip_moves_it_below_the_pointer() {
+    use slint::platform::WindowEvent;
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.seq = 1;
+    publisher.show(&state);
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let cards = || ElementHandle::find_by_element_type_name(&app, "TipCard").collect::<Vec<_>>();
+    let workers = only(&app, "Workers");
+    let (at, size) = (workers.absolute_position(), workers.size());
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    // Rest on the label, about 12 px above the number box `only` finds.
+    let label = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y - 12.0);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: label });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    frame(&app);
+    let shown = cards();
+    assert_eq!(shown.len(), 1, "the label shows the Workers tooltip");
+    let (card_at, card_size) = (shown[0].absolute_position(), shown[0].size());
+    // Diagonally, so the re-anchor moves on both axes.
+    let onto = slint::LogicalPosition::new(
+        card_at.x + card_size.width / 2.0 + 20.0,
+        card_at.y + card_size.height / 2.0,
+    );
+    assert!(
+        onto.y > at.y && onto.y < at.y + size.height,
+        "the card covers the number box (card centre {onto:?}, field {at:?} {size:?})"
+    );
+
+    // Onto the card, still inside the field: it hides at once, before the 100 ms stale timer.
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: onto });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    frame(&app);
+    assert!(cards().is_empty(), "the pointer over the card hides it");
+
+    // Resting there, it comes back after the show delay, anchored at the pointer, below the box.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(450));
+    frame(&app);
+    assert!(cards().is_empty(), "the card waits for the show delay");
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(100));
+    frame(&app);
+    let back = cards();
+    assert_eq!(back.len(), 1, "resting shows the card again");
+    let tip = app.global::<crate::Tip>();
+    assert_eq!(
+        (tip.get_x(), tip.get_y()),
+        (onto.x, onto.y),
+        "the card is anchored where the pointer rests now"
+    );
+    assert!(
+        back[0].absolute_position().y >= at.y + size.height,
+        "the card shows again below the pointer, clear of the number box"
+    );
+    app.hide().unwrap();
+}
+
+/// A card hides only for a pointer inside it: just outside each of its edges, it stays at its
+/// anchor. The area's report (`Tip.owner-x/y`) is set directly, since a pointer beside the card
+/// leaves the Field, and put back on the real pointer before the 100 ms stale timer can hide it.
+#[test]
+fn a_tooltip_card_hides_only_for_a_pointer_inside_it() {
+    use slint::platform::WindowEvent;
+    init_software_renderer();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    let publisher = SlintPublisher::new(&app);
+    let mut state = ViewState::new(None);
+    state.seq = 1;
+    publisher.show(&state);
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+
+    let workers = only(&app, "Workers");
+    let (at, size) = (workers.absolute_position(), workers.size());
+    hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+    let label = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y - 12.0);
+    app.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: label });
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    frame(&app);
+    let card = ElementHandle::find_by_element_type_name(&app, "TipCard")
+        .next()
+        .expect("the label shows the Workers tooltip");
+    let (card_at, card_size) = (card.absolute_position(), card.size());
+    let tip = app.global::<crate::Tip>();
+    let anchor = (tip.get_x(), tip.get_y());
+    let report = |x: f32, y: f32| {
+        tip.set_owner_x(x);
+        tip.set_owner_y(y);
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+        frame(&app);
+    };
+    let (mid_x, mid_y) = (
+        card_at.x + card_size.width / 2.0,
+        card_at.y + card_size.height / 2.0,
+    );
+    for (edge, x, y) in [
+        ("left", card_at.x - 1.0, mid_y),
+        ("right", card_at.x + card_size.width, mid_y),
+        ("top", mid_x, card_at.y - 1.0),
+        ("bottom", mid_x, card_at.y + card_size.height),
+    ] {
+        report(x, y);
+        assert!(
+            tip.get_visible() && (tip.get_x(), tip.get_y()) == anchor,
+            "a pointer just past the card's {edge} edge keeps it at its anchor"
+        );
+        report(label.x, label.y);
+    }
+    // Sideways alone onto the left edge, so only `owner-x` changes.
+    report(card_at.x - 1.0, mid_y);
+    tip.set_owner_x(card_at.x);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    frame(&app);
+    assert!(
+        !tip.get_visible(),
+        "a pointer moving onto the card's left edge hides it"
+    );
+
+    // Up alone onto the top edge, so only `owner-y` changes: back on the label shows the card again.
+    report(label.x, label.y);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+    frame(&app);
+    assert!(
+        tip.get_visible(),
+        "resting on the label shows the card again"
+    );
+    let card = ElementHandle::find_by_element_type_name(&app, "TipCard")
+        .next()
+        .expect("the card again");
+    let (card_at, card_size) = (card.absolute_position(), card.size());
+    report(card_at.x + card_size.width / 2.0, card_at.y - 1.0);
+    assert!(tip.get_visible(), "just above the card keeps it");
+    tip.set_owner_y(card_at.y);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    frame(&app);
+    assert!(
+        !tip.get_visible(),
+        "a pointer moving onto the card's top edge hides it"
+    );
+    app.hide().unwrap();
+}
+
 /// A press that lands as the pointer first enters a tipped Field still latches it. winit's filter
 /// sees the press before Slint flushes the buffered move into the Field, so an area entered while
 /// the button is held latches too (`Tip.held`).

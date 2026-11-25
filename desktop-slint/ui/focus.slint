@@ -71,7 +71,8 @@ export global Tip {
     in-out property <length> x;
     in-out property <length> y;
     // The pointer position last reported by the active TipArea/Pressable. App compares this
-    // against its window-level pointer watcher so a card can never outlive a removed element.
+    // against its window-level pointer watcher so a card can never outlive a removed element,
+    // and `TipCard` moves the card when this enters it (`uncover`).
     in-out property <length> owner-x;
     in-out property <length> owner-y;
     in-out property <int> serial;
@@ -123,6 +124,16 @@ export global Tip {
         }
     }
 
+    // The pointer entered the card, which sits where the pointer first rested: hide it, and show
+    // it again below where the pointer is now (`owner-x/y`, which `hover` updates before its
+    // early return), so it never covers the pointer. `tip-timer` restarts the show delay as
+    // `visible` goes false.
+    public function uncover() {
+        self.visible = false;
+        self.x = self.owner-x;
+        self.y = self.owner-y;
+    }
+
     public function leave(text: string) {
         if text != "" && self.text == text {
             self.hide();
@@ -139,11 +150,20 @@ export global Tip {
 // A tooltip's card with plain text: placed 24px below the pointer hotspot (clearing a 24px cursor
 // bounding box, matching GTK's placement below the cursor), horizontally centred on the pointer
 // and clamped inside the window edges, flipping above the cursor only when it would overflow the
-// window's bottom edge.
+// window's bottom edge. The pointer moving onto the card (still inside its area, such as from a
+// Field's label down to its control) moves it below the pointer (`Tip.uncover`). One case stays
+// covered: a card flipped above and clamped to the top margin can cover the pointer when the
+// window is shorter than twice the card's height plus 40px (at the 520px minimum, a card over
+// 240px tall); a move there still hides it, and it shows again in the same spot after the delay
+// (tracked in #262).
 export component TipCard inherits Rectangle {
     in property <string> text;
+    // Where the pointer rested when the card was placed.
     in property <length> pointer-x;
     in property <length> pointer-y;
+    // Where the pointer is now, as its area last reported it.
+    in property <length> owner-x;
+    in property <length> owner-y;
     in property <length> window-width;
     in property <length> window-height;
     property <length> cursor-gap: 24px;
@@ -161,6 +181,16 @@ export component TipCard inherits Rectangle {
         : max(self.edge-margin, self.pointer-y - self.card-height - self.edge-margin);
     width: self.card-width;
     height: self.card-height;
+    // Watches the pointer, not the hit test: `uncover` moves the card, which a handler must not
+    // feed back into what it watches.
+    changed owner-x => { self.uncover-if-covered(); }
+    changed owner-y => { self.uncover-if-covered(); }
+    function uncover-if-covered() {
+        if self.owner-x >= self.x && self.owner-x < self.x + self.width
+            && self.owner-y >= self.y && self.owner-y < self.y + self.height {
+            Tip.uncover();
+        }
+    }
     border-radius: 6px;
     background: Theme.float;
     border-width: 1px;
