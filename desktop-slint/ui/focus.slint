@@ -149,13 +149,12 @@ export global Tip {
 
 // A tooltip's card with plain text: placed 24px below the pointer hotspot (clearing a 24px cursor
 // bounding box, matching GTK's placement below the cursor), horizontally centred on the pointer
-// and clamped inside the window edges, flipping above the cursor only when it would overflow the
-// window's bottom edge. The pointer moving onto the card (still inside its area, such as from a
-// Field's label down to its control) moves it below the pointer (`Tip.uncover`). One case stays
-// covered: a card flipped above and clamped to the top margin can cover the pointer when the
-// window is shorter than twice the card's height plus 40px (at the 520px minimum, a card over
-// 240px tall); a move there still hides it, and it shows again in the same spot after the delay
-// (tracked in #262).
+// and clamped inside the window edges, flipping above the cursor when it would overflow the
+// window's bottom edge. When its full height fits on neither side, it takes whichever side has
+// more room, limited to whole lines inside that room and ending in "…", so it never covers the
+// pointer or leaves the window. The pointer moving onto the card (still inside its area, such as
+// from a Field's label down to its control) hides it and shows it again clear of the pointer
+// (`Tip.uncover`).
 export component TipCard inherits Rectangle {
     in property <string> text;
     // Where the pointer rested when the card was placed.
@@ -168,15 +167,38 @@ export component TipCard inherits Rectangle {
     in property <length> window-height;
     property <length> cursor-gap: 24px;
     property <length> edge-margin: 8px;
+    // Padding inside the card and tip text size, shared by the off-screen probes and `tip-text`.
+    property <length> pad-x: 8px;
+    property <length> pad-y: 5px;
+    property <length> text-size: 12px;
     // At most 440px wide so sentence tips (like complexity's 61 chars, ~364px in GTK) stay on
     // one line while longer run titles with paths still wrap.
-    property <length> card-width: min(tip-text.preferred-width + 16px, 440px);
-    property <length> card-height: tip-text.preferred-height + 10px;
+    property <length> card-width: min(tip-measure.preferred-width + 2 * self.pad-x, 440px);
+    property <length> full-height: tip-measure.preferred-height + 2 * self.pad-y;
     property <length> max-x: max(self.edge-margin, self.window-width - self.edge-margin - self.card-width);
     property <length> below-y: self.pointer-y + self.cursor-gap;
+    // Room on each side within the 8px window margins (above also keeps an 8px gap over the pointer).
+    property <length> room-below: self.window-height - self.edge-margin - self.below-y;
+    property <length> room-above: self.pointer-y - 2 * self.edge-margin;
+    // Below if the full card fits there; otherwise above if it fits there (which implies
+    // `room-above > room-below`), otherwise whichever side has more room.
+    property <bool> place-below: self.full-height <= self.room-below || self.room-below >= self.room-above;
+    property <length> side-room: self.place-below ? self.room-below : self.room-above;
+    property <bool> limited: self.full-height > self.side-room;
+    property <length> text-room: self.side-room - 2 * self.pad-y;
+    property <length> line-height: line-probe.preferred-height / 32;
+    property <int> raw-lines: Math.floor(self.text-room / self.line-height);
+    // The 32-line probe overestimates line height by at most 1/32px, so the largest whole-line
+    // count that fits is `raw - 1`, `raw` or `raw + 1` (for any room under ~7,000px).
+    property <int> max-visible-lines: self.limited
+        ? max(1, fit-next-probe.preferred-height <= self.text-room ? self.raw-lines + 1
+            : fit-probe.preferred-height <= self.text-room ? self.raw-lines
+            : self.raw-lines - 1)
+        : 0;
+    property <length> card-height: tip-text.preferred-height + 2 * self.pad-y;
 
     x: clamp(self.pointer-x - self.card-width / 2, self.edge-margin, self.max-x);
-    y: self.below-y + self.card-height <= self.window-height - self.edge-margin
+    y: self.place-below
         ? self.below-y
         : max(self.edge-margin, self.pointer-y - self.card-height - self.edge-margin);
     width: self.card-width;
@@ -195,14 +217,52 @@ export component TipCard inherits Rectangle {
     background: Theme.float;
     border-width: 1px;
     border-color: Theme.sep;
+    // Off-screen probes for the 12px line height, unlimited wrapped height, and `raw-lines` /
+    // `raw-lines + 1` fit checks so `tip-text` can bind `max-lines` without feeding back into its
+    // own `preferred-height`.
+    // 32 lines; keep in step with the `/ 32` in `line-height`.
+    line-probe := Text {
+        visible: false;
+        accessible-role: none;
+        text: "Ag\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg\nAg";
+        font-size: root.text-size;
+    }
+    tip-measure := Text {
+        visible: false;
+        accessible-role: none;
+        width: root.card-width - 2 * root.pad-x;
+        text: root.text;
+        font-size: root.text-size;
+        wrap: word-wrap;
+    }
+    fit-probe := Text {
+        visible: false;
+        accessible-role: none;
+        width: root.card-width - 2 * root.pad-x;
+        text: root.text;
+        font-size: root.text-size;
+        wrap: word-wrap;
+        max-lines: root.raw-lines;
+    }
+    fit-next-probe := Text {
+        visible: false;
+        accessible-role: none;
+        width: root.card-width - 2 * root.pad-x;
+        text: root.text;
+        font-size: root.text-size;
+        wrap: word-wrap;
+        max-lines: root.raw-lines + 1;
+    }
     tip-text := Text {
-        x: 8px;
-        y: 5px;
-        width: parent.width - 16px;
+        x: root.pad-x;
+        y: root.pad-y;
+        width: parent.width - 2 * root.pad-x;
         text: root.text;
         color: Theme.fg;
-        font-size: 12px;
+        font-size: root.text-size;
         wrap: word-wrap;
+        max-lines: root.max-visible-lines;
+        overflow: elide;
     }
 }
 
