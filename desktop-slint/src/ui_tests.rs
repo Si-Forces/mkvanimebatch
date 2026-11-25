@@ -7090,3 +7090,473 @@ fn a_click_elsewhere_does_not_latch_the_field_entered_next() {
     );
     app.hide().unwrap();
 }
+
+/// At the 520px minimum window height, a failed row with a long multi-line tool error limits its
+/// tooltip card to the room on the bigger side of the pointer (below near the top, above near the
+/// bottom, bigger side in the middle), never covering the pointer or leaving the 8px window
+/// margins, while keeping the full text in the accessible description and keeping short tips at
+/// their usual spot and height.
+#[test]
+fn a_long_tooltip_card_limits_to_the_room_beside_the_pointer() {
+    init_software_renderer();
+    let app = new_app();
+    let (win_w, win_h) = (920.0_f32, 520.0_f32);
+    app.window().set_size(slint::LogicalSize::new(win_w, win_h));
+    let publisher = SlintPublisher::new(&app);
+
+    let mut long_error = String::from("ffmpeg failed (exit 1):\n");
+    for i in 1..=40 {
+        long_error.push_str(&format!(
+            "[matroska @ 0x7f0000{i:02}] Non-monotonous DTS in output stream 0:1; previous: {i}000, current: {i}000\n"
+        ));
+    }
+
+    let mut rows: Vec<Row> = (1..=20)
+        .map(|i| row(&format!("Frieren - {i:02}.mkv")))
+        .collect();
+    rows[8].status = ItemStatus::Error;
+    rows[8].label = "Failed".into();
+    rows[8].tone = Tone::Err;
+    rows[8].title = long_error.clone();
+    rows[8].bucket = Some(Bucket::Failed);
+
+    rows[9].label = "Waiting".into();
+    rows[9].title = "Queued for remux".into();
+
+    let mut state = ViewState::new(None);
+    state.seq = 1;
+    state.remux.title = "Frieren".into();
+    state.remux.empty = None;
+    state.remux.rows = Arc::new(rows);
+    state.remux.controls.run_disabled = true;
+    state.remux.controls.run_title = "Open a folder with episodes first".into();
+    publisher.show(&state);
+    app.show().unwrap();
+    frame(&app);
+
+    // Move `row_index`'s status element (`label`) to `target_y` by scrolling the queue list.
+    let scroll_to = |row_index: i32, label: &str, target_y: f32| -> ElementHandle {
+        if ElementHandle::find_by_accessible_label(&app, label)
+            .next()
+            .is_none()
+        {
+            app.invoke_reveal(Mode::Remux, row_index);
+            frame(&app);
+        }
+        for _ in 0..4 {
+            let el = only(&app, label);
+            let center_y = el.absolute_position().y + el.size().height / 2.0;
+            if (center_y - target_y).abs() <= 2.0 {
+                return el;
+            }
+            app.set_remux_scroll(app.get_remux_scroll() + (target_y - center_y));
+            frame(&app);
+        }
+        only(&app, label)
+    };
+
+    let card = || {
+        ElementHandle::find_by_element_type_name(&app, "TipCard")
+            .next()
+            .expect("visible TipCard")
+    };
+
+    let tip_element = |id: &str| {
+        ElementHandle::find_by_element_id(&app, id)
+            .next()
+            .unwrap_or_else(|| panic!("missing {id}"))
+    };
+
+    let check_bounds = |name: &str, p: slint::LogicalPosition, expect_below: bool| {
+        let c = card();
+        let (at, size) = (c.absolute_position(), c.size());
+        // `ElementHandle::find_by_element_id` skips `visible: false` items; all four off-screen
+        // probes must stay hidden so only `tip-text` paints inside the card.
+        assert_eq!(
+            ElementHandle::find_by_element_id(&app, "TipCard::line-probe").count(),
+            0,
+            "{name}: line-probe must stay hidden"
+        );
+        assert_eq!(
+            ElementHandle::find_by_element_id(&app, "TipCard::tip-measure").count(),
+            0,
+            "{name}: tip-measure must stay hidden"
+        );
+        assert_eq!(
+            ElementHandle::find_by_element_id(&app, "TipCard::fit-probe").count(),
+            0,
+            "{name}: fit-probe must stay hidden"
+        );
+        assert_eq!(
+            ElementHandle::find_by_element_id(&app, "TipCard::fit-next-probe").count(),
+            0,
+            "{name}: fit-next-probe must stay hidden"
+        );
+        assert_eq!(
+            ElementHandle::find_by_element_id(&app, "TipCard::tip-text").count(),
+            1,
+            "{name}: tip-text must be visible"
+        );
+        assert!(
+            size.width <= 440.5,
+            "{name}: card width {} must stay <= 440px",
+            size.width
+        );
+        assert!(
+            at.x >= 7.5 && at.x + size.width <= win_w - 7.5,
+            "{name}: card horizontal [{}, {}] must stay within 8px of 0..{win_w}",
+            at.x,
+            at.x + size.width
+        );
+        assert!(
+            at.y >= 8.0 && at.y + size.height <= win_h - 8.0,
+            "{name}: card vertical [{}, {}] must stay within 8px of 0..{win_h}",
+            at.y,
+            at.y + size.height
+        );
+        let contains_pointer =
+            p.x >= at.x && p.x < at.x + size.width && p.y >= at.y && p.y < at.y + size.height;
+        assert!(
+            !contains_pointer,
+            "{name}: card ({at:?}, {size:?}) must not contain pointer {p:?}"
+        );
+        if expect_below {
+            assert!(
+                (at.y - (p.y + 24.0)).abs() <= 0.5,
+                "{name}: card top {} must sit 24px below pointer.y {}",
+                at.y,
+                p.y
+            );
+        } else {
+            assert!(
+                ((at.y + size.height) - (p.y - 8.0)).abs() <= 0.5,
+                "{name}: card bottom {} must sit 8px above pointer.y {}",
+                at.y + size.height,
+                p.y
+            );
+        }
+        (at, size)
+    };
+
+    let room_below = |y: f32| win_h - 8.0 - (y + 24.0);
+    let room_above = |y: f32| y - 16.0;
+
+    // Measure unlimited n-line text heights (1..=32) once in a tall window; `l_hat` is `TipCard`'s
+    // own 32-line probe advance (`measure_lines(32) / 32`).
+    let tip = app.global::<crate::Tip>();
+    app.window().set_size(slint::LogicalSize::new(win_w, 800.0));
+    let mut line_heights = [0.0_f32; 33];
+    for (n, slot) in line_heights.iter_mut().enumerate().skip(1) {
+        let sample = std::iter::repeat_n("Ag", n).collect::<Vec<_>>().join("\n");
+        tip.set_text(sample.into());
+        tip.set_x(400.0);
+        tip.set_y(50.0);
+        tip.set_visible(true);
+        frame(&app);
+        *slot = tip_element("TipCard::tip-text").size().height;
+    }
+    tip.invoke_hide();
+    app.window().set_size(slint::LogicalSize::new(win_w, win_h));
+    frame(&app);
+    let measure_lines = |count: usize| line_heights[count];
+    let l_hat = measure_lines(32) / 32.0;
+    assert!(
+        l_hat > 10.0 && l_hat < 20.0,
+        "measured 12px line height should be plausible, got {l_hat}"
+    );
+    let expected_limited_height = |side_room: f32| -> (usize, f32) {
+        let text_room = side_room - 10.0;
+        let n = (1..=32)
+            .take_while(|&k| measure_lines(k) <= text_room)
+            .last()
+            .expect("at least one line fits in side_room");
+        (n, measure_lines(n) + 10.0)
+    };
+
+    // Accessible description keeps the full error text; only the visible card is cut.
+    let failed_top = scroll_to(8, "Failed", 185.0);
+    assert_eq!(
+        failed_top.accessible_description().as_deref(),
+        Some(long_error.as_str()),
+        "accessible description keeps the full multi-line error"
+    );
+
+    // 1. Near the top of the list (room below > room above): card goes below, limited.
+    let p_top = hover_center_for_tip(&app, &failed_top);
+    let top_room_below = room_below(p_top.y);
+    assert!(
+        top_room_below > room_above(p_top.y),
+        "top position has more room below than above (y={})",
+        p_top.y
+    );
+    let (top_at, top_size) = check_bounds("near top", p_top, true);
+    let (top_n, top_expected_h) = expected_limited_height(top_room_below);
+    assert!(
+        (top_size.height - top_expected_h).abs() <= 0.5,
+        "near top: limited card height {} should equal exact {top_n}-line height {top_expected_h}",
+        top_size.height
+    );
+
+    // `uncover-if-covered` uses the limited height: just below the limited card stays visible,
+    // while inside it hides.
+    tip.set_owner_x(top_at.x + top_size.width / 2.0);
+    tip.set_owner_y(top_at.y + top_size.height + 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    frame(&app);
+    assert!(
+        tip.get_visible(),
+        "a pointer past the limited card's bottom edge keeps it shown"
+    );
+    tip.set_owner_y(top_at.y + top_size.height - 1.0);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1));
+    frame(&app);
+    assert!(
+        !tip.get_visible(),
+        "a pointer inside the limited card hides it"
+    );
+
+    // 2a. Middle, comfortably above the 252px split (room below > room above): goes below, limited.
+    let failed_mid_hi = scroll_to(8, "Failed", 244.0);
+    let p_mid_hi = hover_center_for_tip(&app, &failed_mid_hi);
+    let mid_hi_room = room_below(p_mid_hi.y);
+    assert!(
+        mid_hi_room > room_above(p_mid_hi.y),
+        "upper-middle position has more room below (y={})",
+        p_mid_hi.y
+    );
+    let (_, mid_hi_size) = check_bounds("middle (below bigger)", p_mid_hi, true);
+    let (mid_hi_n, mid_hi_expected_h) = expected_limited_height(mid_hi_room);
+    assert!(
+        (mid_hi_size.height - mid_hi_expected_h).abs() <= 0.5,
+        "middle (below bigger): limited card height {} should equal exact {mid_hi_n}-line height {mid_hi_expected_h}",
+        mid_hi_size.height
+    );
+
+    // 2b. Middle, comfortably below the 252px split (room above > room below): goes above, limited.
+    let failed_mid_lo = scroll_to(8, "Failed", 260.0);
+    let p_mid_lo = hover_center_for_tip(&app, &failed_mid_lo);
+    let mid_lo_room = room_above(p_mid_lo.y);
+    assert!(
+        mid_lo_room > room_below(p_mid_lo.y),
+        "lower-middle position has more room above (y={})",
+        p_mid_lo.y
+    );
+    let (_, mid_lo_size) = check_bounds("middle (above bigger)", p_mid_lo, false);
+    let (mid_lo_n, mid_lo_expected_h) = expected_limited_height(mid_lo_room);
+    assert!(
+        (mid_lo_size.height - mid_lo_expected_h).abs() <= 0.5,
+        "middle (above bigger): limited card height {} should equal exact {mid_lo_n}-line height {mid_lo_expected_h}",
+        mid_lo_size.height
+    );
+
+    // 3. Near the bottom of the list (room above > room below): card goes above, limited.
+    let failed_bot = scroll_to(8, "Failed", 425.0);
+    let p_bot = hover_center_for_tip(&app, &failed_bot);
+    let bot_room_above = room_above(p_bot.y);
+    assert!(
+        bot_room_above > room_below(p_bot.y),
+        "bottom position has more room above (y={})",
+        p_bot.y
+    );
+    let (_, bot_size) = check_bounds("near bottom", p_bot, false);
+    let (bot_n, bot_expected_h) = expected_limited_height(bot_room_above);
+    assert!(
+        (bot_size.height - bot_expected_h).abs() <= 0.5,
+        "near bottom: limited card height {} should equal exact {bot_n}-line height {bot_expected_h}",
+        bot_size.height
+    );
+
+    // 4. Short tip in the same 520px window: even in the lower half (where room above > room
+    // below), a short tip that fits below stays below at its single-line text height + 10px
+    // padding; near the bottom edge it flips above at the same height.
+    let short_mid = scroll_to(9, "Waiting", 350.0);
+    let p_short = hover_center_for_tip(&app, &short_mid);
+    assert!(
+        room_above(p_short.y) > room_below(p_short.y),
+        "short tip sits in the lower half where above has more room (y={})",
+        p_short.y
+    );
+    let (_, short_size) = check_bounds("short tip below", p_short, true);
+    let short_text_h = tip_element("TipCard::tip-text").size().height;
+    assert!(
+        short_text_h <= l_hat + 1.5,
+        "short tip text should be one line (got {short_text_h}, l_hat={l_hat})"
+    );
+    assert!(
+        (short_size.height - (short_text_h + 10.0)).abs() <= 0.5,
+        "short tip height {} should equal single-line text ({short_text_h}) + 10px padding",
+        short_size.height
+    );
+
+    let run = only(&app, "Run remux");
+    let p_run = hover_center_for_tip(&app, &run);
+    let (_, run_size) = check_bounds("short tip flipped above", p_run, false);
+    assert!(
+        (run_size.height - short_size.height).abs() <= 0.5,
+        "flipped short tip height {} should equal the measured single-line card height {}",
+        run_size.height,
+        short_size.height
+    );
+
+    // 5. Exact-fit boundary checks derived from `l_hat` and `measure_lines`.
+
+    // 5a/5b. Find an `n` placed below where `h_n - 0.3 >= n * l_hat`, so at `text_room = h_n - 0.3`
+    // `floor(text_room / l_hat)` still equals `n` while `n` lines do not fit, exercising the
+    // `raw-lines - 1` branch.
+    let (n_over, h_over) = (15..=29)
+        .filter_map(|n| {
+            let h_n = measure_lines(n);
+            let y_tight = win_h - 8.0 - 24.0 - (h_n + 10.0) + 0.3;
+            let tight_room = room_below(y_tight) - 10.0;
+            if y_tight >= 20.0
+                && room_below(y_tight) > room_above(y_tight)
+                && (tight_room / l_hat).floor() as usize == n
+                && tight_room < h_n
+            {
+                Some((n, h_n))
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("font must have an n in 15..=29 where floor((h_n - 0.3) / l_hat) == n");
+    let h_over_minus_1 = measure_lines(n_over - 1);
+
+    // 5a. Text room equals `h_over` exactly: card must show all `n_over` lines (`h_over + 10px`).
+    let y_exact = win_h - 8.0 - 24.0 - (h_over + 10.0);
+    assert!(
+        room_below(y_exact) > room_above(y_exact),
+        "exact {n_over}-line boundary has more room below (y={y_exact})"
+    );
+    tip.set_text(long_error.clone().into());
+    tip.set_x(400.0);
+    tip.set_y(y_exact);
+    tip.set_visible(true);
+    frame(&app);
+    let (_, exact_size) = check_bounds(
+        "exact n-line fit",
+        slint::LogicalPosition::new(400.0, y_exact),
+        true,
+    );
+    assert!(
+        (exact_size.height - (h_over + 10.0)).abs() <= 0.5,
+        "exact {n_over}-line boundary: height {} must equal {h_over} + 10px",
+        exact_size.height
+    );
+
+    // 5b. Text room is 0.3px less than `h_over`: `floor(text_room / l_hat) == n_over` yet `n_over`
+    // lines overflow, so the `raw-lines - 1` branch must drop to `n_over - 1` lines.
+    let y_tight = y_exact + 0.3;
+    let tight_text_room = room_below(y_tight) - 10.0;
+    assert_eq!(
+        (tight_text_room / l_hat).floor() as usize,
+        n_over,
+        "5b premise: floor({tight_text_room} / {l_hat}) must still equal {n_over}"
+    );
+    assert!(
+        tight_text_room < h_over,
+        "5b premise: {tight_text_room} must be strictly less than {h_over}"
+    );
+    assert!(
+        room_below(y_tight) > room_above(y_tight),
+        "0.3px-under boundary still has more room below (y={y_tight})"
+    );
+    tip.set_y(y_tight);
+    frame(&app);
+    let (_, tight_size) = check_bounds(
+        "0.3px under n-line fit",
+        slint::LogicalPosition::new(400.0, y_tight),
+        true,
+    );
+    assert!(
+        (tight_size.height - (h_over_minus_1 + 10.0)).abs() <= 0.5,
+        "0.3px-under boundary: height {} must drop to {} + 10px ({} lines)",
+        tight_size.height,
+        h_over_minus_1,
+        n_over - 1
+    );
+
+    // 5c. Find an `n` placed above where `h_n < n * l_hat`, so `floor(h_n / l_hat) == n - 1` while
+    // `n` lines fit, exercising the `raw-lines + 1` branch (`fit-next-probe`).
+    let (n_under, h_under) = (15..=29)
+        .filter_map(|n| {
+            let h_n = measure_lines(n);
+            let y_above = 16.0 + h_n + 10.0;
+            if y_above <= win_h - 20.0
+                && room_above(y_above - 0.3) > room_below(y_above - 0.3)
+                && h_n < n as f32 * l_hat
+            {
+                Some((n, h_n))
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("font must have an n in 15..=29 where h_n < n * l_hat");
+    let h_under_minus_1 = measure_lines(n_under - 1);
+    assert_eq!(
+        (h_under / l_hat).floor() as usize,
+        n_under - 1,
+        "5c premise: floor({h_under} / {l_hat}) must equal {}",
+        n_under - 1
+    );
+
+    let y_plus_exact = 16.0 + h_under + 10.0;
+    assert!(
+        room_above(y_plus_exact) > room_below(y_plus_exact),
+        "exact {n_under}-line above boundary has more room above (y={y_plus_exact})"
+    );
+    tip.set_text(long_error.clone().into());
+    tip.set_x(400.0);
+    tip.set_y(y_plus_exact);
+    tip.set_visible(true);
+    frame(&app);
+    let (_, plus_exact_size) = check_bounds(
+        "exact raw-lines+1 fit",
+        slint::LogicalPosition::new(400.0, y_plus_exact),
+        false,
+    );
+    assert!(
+        (plus_exact_size.height - (h_under + 10.0)).abs() <= 0.5,
+        "exact {n_under}-line above boundary: height {} must equal {h_under} + 10px",
+        plus_exact_size.height
+    );
+
+    let y_plus_tight = y_plus_exact - 0.3;
+    assert!(
+        room_above(y_plus_tight) > room_below(y_plus_tight),
+        "0.3px-tighter above boundary still has more room above (y={y_plus_tight})"
+    );
+    tip.set_y(y_plus_tight);
+    frame(&app);
+    let (_, plus_tight_size) = check_bounds(
+        "0.3px under raw-lines+1 fit",
+        slint::LogicalPosition::new(400.0, y_plus_tight),
+        false,
+    );
+    assert!(
+        (plus_tight_size.height - (h_under_minus_1 + 10.0)).abs() <= 0.5,
+        "0.3px-tighter above boundary: height {} must drop to {} + 10px ({} lines)",
+        plus_tight_size.height,
+        h_under_minus_1,
+        n_under - 1
+    );
+
+    // 6. Degenerate window height (< pad-y + 1 line): `max(1, ...)` still caps to 1 line instead
+    // of passing 0 (unlimited) to `Text.max-lines`.
+    app.window().set_size(slint::LogicalSize::new(win_w, 60.0));
+    tip.set_text(long_error.into());
+    tip.set_x(400.0);
+    tip.set_y(30.0);
+    tip.set_visible(true);
+    frame(&app);
+    let tiny = card();
+    assert!(
+        (tiny.size().height - (short_text_h + 10.0)).abs() <= 0.5,
+        "tiny window caps limited card to 1 line ({} + 10px), got {}",
+        short_text_h,
+        tiny.size().height
+    );
+
+    app.hide().unwrap();
+}
