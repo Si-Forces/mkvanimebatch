@@ -3,7 +3,7 @@
 import "fonts/Onest-wght.ttf";
 import "fonts/Unbounded-wght.ttf";
 import "fonts/JetBrainsMono-wght.ttf";
-import { Theme } from "theme.slint";
+import { Surface, Theme } from "theme.slint";
 import { AppearanceMenu, TitleBar } from "title-bar.slint";
 import { Focus, Pressable, Tip, TipCard } from "focus.slint";
 import { FontProbe } from "font-probe.slint";
@@ -15,7 +15,7 @@ import { BottomBar, ConfirmDialog, DialogTexts, JobBar, StatusDot, StatusTone, T
 import { LogBadge, LogDrawer, LogRow, LogSerials, LogTone, LogToggle } from "log.slint";
 
 // FontProbe is test only; a .slint file cannot be compiled per cfg, so it ships (a few bytes).
-export { Theme, Focus, Tip, Spin, FontProbe, CrumbPart, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
+export { Surface, Theme, Focus, Tip, Spin, FontProbe, CrumbPart, Inspector, LibraryItem, Mode, QueueFilter, QueueHead, QueueRow, RowMark, RowTone, Rung, ChipTexts, DraftForm, PresetItem, Sheet, SheetLimits, DialogTexts, JobBar, StatusTone, Telemetry, LogBadge, LogRow, LogSerials, LogTone }
 
 // A mode's tab in the sidebar (.task-row): its icon, its name over what it does and its status
 // pill (a dot), then the gear that opens its settings sheet.
@@ -93,7 +93,7 @@ component ModeTab inherits Rectangle {
                 color: Theme.mute;
                 font-size: 11px;
                 line-height-factor: Theme.lh-nav;
-                wrap: word-wrap;
+                wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                 accessible-role: none;
             }
         }

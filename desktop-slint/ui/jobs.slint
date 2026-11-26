@@ -1,7 +1,7 @@
 // Redesign C's job controls (desktop-tauri/ui/index.html .bar, #confirm-modal; style.css .cap,
 // .pill-btn, .stack, .status-pill, .modal-card). Layout and bindings only: the host
 // (desktop-slint/src/jobs.rs) maps every text, count, width and tone from the published controls.
-import { GlassPane, Theme } from "theme.slint";
+import { GlassPane, Surface, Theme } from "theme.slint";
 import { Pressable, Tip, TipArea } from "focus.slint";
 
 // The status pill's style (presentation.rs `StatusPill::class`).
@@ -106,6 +106,7 @@ export component CapButton inherits Pressable {
             color: root.ink;
             font-weight: 700;
             vertical-alignment: center;
+            wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
             accessible-role: none;
         }
     }
@@ -323,12 +324,14 @@ export component BottomBar inherits Rectangle {
                     color: Theme.mute;
                     font-size: 11px;
                     line-height-factor: Theme.lh-body;
+                    wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
                 }
                 Text {
                     text: root.io-jobs;
                     color: Theme.mute;
                     font-size: 11px;
                     line-height-factor: Theme.lh-body;
+                    wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
                 }
             }
             TipArea {
@@ -432,14 +435,14 @@ export component ConfirmDialog inherits Rectangle {
                     font-size: 16px;
                     font-weight: 700;
                     line-height-factor: Theme.lh-body;
-                    wrap: word-wrap;
+                    wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                     accessible-role: none;
                 }
                 Text {
                     text: root.texts.text;
                     color: Theme.mute;
                     line-height-factor: Theme.lh-body;
-                    wrap: word-wrap;
+                    wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                     overflow: elide;
                     min-height: 0px;
                     vertical-stretch: 1;

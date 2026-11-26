@@ -2,7 +2,7 @@
 // and bindings only: the host maps every row and the header (desktop-slint/src/queue.rs) and does
 // what the controls ask.
 import { ListView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Surface, Theme } from "theme.slint";
 import { Focus, Pressable, TipArea } from "focus.slint";
 
 export enum Mode { remux, extract }
@@ -545,6 +545,7 @@ component Chip inherits Pressable {
             font-size: 12px;
             font-weight: 500;
             vertical-alignment: center;
+            wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
             accessible-role: none;
         }
         Text {
@@ -553,6 +554,7 @@ component Chip inherits Pressable {
             font-size: 12px;
             font-weight: 500;
             vertical-alignment: center;
+            wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
             accessible-role: none;
         }
     }
@@ -573,6 +575,7 @@ export component LinkButton inherits Pressable {
         font-size: 12px;
         font-weight: 600;
         vertical-alignment: center;
+        wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
         accessible-role: none;
     }
 }
@@ -590,6 +593,7 @@ component AccentButton inherits Pressable {
         text: root.text;
         color: Theme.accent-fg;
         font-weight: 700;
+        wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
         accessible-role: none;
     }
 }
@@ -963,14 +967,14 @@ export component QueuePane inherits Rectangle {
                         font-weight: 700;
                         line-height-factor: Theme.lh-body;
                         horizontal-alignment: center;
-                        wrap: word-wrap;
+                        wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                     }
                     Text {
                         text: root.head.card-text;
                         color: Theme.mute;
                         line-height-factor: Theme.lh-body;
                         horizontal-alignment: center;
-                        wrap: word-wrap;
+                        wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                     }
                     if root.head.card-action != "": HorizontalLayout {
                         alignment: center;

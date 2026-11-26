@@ -2,7 +2,7 @@
 // entries (.library-tree). Layout and bindings only: the host maps every text
 // (desktop-slint/src/inspector.rs) and does what the controls ask.
 import { ScrollView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Surface, Theme } from "theme.slint";
 import { Focus, FocusRing, Pressable, Select, TextField, TipArea } from "focus.slint";
 import { LinkButton, RowTone } from "queue.slint";
 import { SectionHead } from "settings.slint";
@@ -137,7 +137,7 @@ component Crumbs inherits Rectangle {
             font-size: 12px;
             line-height-factor: Theme.lh-crumbs;
             font-weight: self.last && !root.plain && !part.sep ? 600 : 400;
-            wrap: word-wrap;
+            wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
             // A crumb with no space to break at wraps within the line, not past it.
             min-width: 0px;
             max-width: root.width;
@@ -360,7 +360,7 @@ export component InspectorPane inherits Rectangle {
                             font-family: "JetBrains Mono";
                             font-size: 12px;
                             line-height-factor: Theme.lh-body-mono;
-                            wrap: word-wrap;
+                            wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                         }
                     }
                     // A Tab stop, so the keyboard-focus ring (:focus-visible), not after a click.
@@ -427,7 +427,7 @@ export component InspectorPane inherits Rectangle {
                                 color: Theme.fg;
                                 font-size: 12px;
                                 line-height-factor: Theme.lh-body;
-                                wrap: word-wrap;
+                                wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                                 horizontal-stretch: 1;
                             }
                         }
@@ -438,7 +438,7 @@ export component InspectorPane inherits Rectangle {
                                 color: Theme.fg;
                                 font-size: 12px;
                                 line-height-factor: Theme.lh-body;
-                                wrap: word-wrap;
+                                wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                                 horizontal-stretch: 1;
                             }
                         }
@@ -647,7 +647,7 @@ export component InspectorPane inherits Rectangle {
                             color: Theme.path;
                             font-size: 12px;
                             line-height-factor: Theme.lh-body;
-                            wrap: word-wrap;
+                            wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                         }
                     }
                 }
