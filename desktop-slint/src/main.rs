@@ -18,7 +18,7 @@ mod telemetry;
 #[cfg(test)]
 mod ui_tests;
 
-use mkv_anime_batch_slint_ui::{App, Focus, Tip};
+use mkv_anime_batch_slint_ui::{App, Focus, Surface, Tip};
 use mkv_desktop_core::actor::{Core, Intent, Ports};
 use mkv_desktop_core::control::{
     begin_shutdown, cancel_shutdown, cleanup_owned_processes, InspectCacheState, ScanState,
@@ -251,23 +251,33 @@ const WINDOW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// error whether Slint creates the window as it resumes or later, after the appearance wait
 /// (ADR-0017, 2026-11-20 amendment); at 45cb2b3 the later path kept the error and idled with no
 /// window, so the deadline below stays as a backstop. The first drawn frame marks `Drew` (and
-/// forgets a saved software choice when `forget` names its directory); no window by
-/// [`WINDOW_DEADLINE`] marks `NoWindow` and quits the loop, which then returns any error Slint
-/// kept.
+/// forgets a saved software choice when `forget` names its directory) and bumps `Surface.epoch`
+/// once (independent of `GpuStart`); no window by [`WINDOW_DEADLINE`] marks `NoWindow` and quits
+/// the loop, which then returns any error Slint kept.
 fn watch_start(app: &App, forget: Option<PathBuf>, start: Rc<Cell<GpuStart>>) {
     let drawn = Rc::clone(&start);
     let forgetting = forget.is_some();
+    let surface_window = app.as_weak();
+    let mut surface_bumped = false;
     // Skia answers the notifier; only the software renderer would refuse it.
     let notified = app.window().set_rendering_notifier(move |state, _| {
-        if matches!(state, RenderingState::AfterRendering) && drawn.get() == GpuStart::Pending {
-            drawn.set(GpuStart::Drew);
-            if let Some(dir) = &forget {
-                match renderer::forget_saved(dir) {
-                    Ok(()) => {
-                        tracing::info!("OpenGL drew: the software renderer choice is forgotten")
-                    }
-                    Err(error) => {
-                        tracing::warn!("Cannot forget the software renderer choice: {error}")
+        if matches!(state, RenderingState::AfterRendering) {
+            if !surface_bumped {
+                surface_bumped = true;
+                if let Some(app) = surface_window.upgrade() {
+                    app.global::<Surface>().set_epoch(1);
+                }
+            }
+            if drawn.get() == GpuStart::Pending {
+                drawn.set(GpuStart::Drew);
+                if let Some(dir) = &forget {
+                    match renderer::forget_saved(dir) {
+                        Ok(()) => {
+                            tracing::info!("OpenGL drew: the software renderer choice is forgotten")
+                        }
+                        Err(error) => {
+                            tracing::warn!("Cannot forget the software renderer choice: {error}")
+                        }
                     }
                 }
             }

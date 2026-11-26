@@ -1,7 +1,7 @@
 // Redesign C's Run Log (desktop-tauri/ui/index.html #btn-log, #log-drawer; style.css .pill-btn,
 // .badge, .logdrawer, .log-body, .log-line). Layout and bindings only: the host
 // (desktop-slint/src/run_log.rs) maps each line's display text and tone, and the badge's text.
-import { GlassPane, Theme } from "theme.slint";
+import { GlassPane, Surface, Theme } from "theme.slint";
 import { Pressable } from "focus.slint";
 import { LinkButton } from "queue.slint";
 import { ListView } from "std-widgets.slint";
@@ -80,6 +80,7 @@ export component LogToggle inherits Pressable {
                 color: Theme.err-fg;
                 font-size: 10px;
                 font-weight: 600;
+                wrap: Surface.epoch >= 0 ? no-wrap : no-wrap;
                 accessible-role: none;
             }
         }
@@ -157,7 +158,7 @@ component LogConsole inherits Rectangle {
                 font-family: "JetBrains Mono";
                 font-size: 12px;
                 line-height-factor: Theme.lh-log;
-                wrap: word-wrap;
+                wrap: Surface.epoch >= 0 ? word-wrap : word-wrap;
                 color: line.tone == LogTone.err ? Theme.err
                     : line.tone == LogTone.warn ? Theme.warn
                     : line.tone == LogTone.ok ? Theme.ok

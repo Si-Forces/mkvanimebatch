@@ -152,6 +152,15 @@ export global Theme {
     out property <color> run-fg: dark ? #04222b : #ffffff;
 }
 
+// Bumped once after Skia's first frame; dynamic text sites read it via `wrap:` (re-stating their
+// own wrap mode, read outside the text cache) so layouts re-link after set_surface clears the
+// cache without dirtying dependents. One bump suffices because winit sets the surface once per
+// native window and this app never hides its main window (on Wayland a hide destroys the surface
+// and a re-show would need another bump) (#254, upstream: slint-ui/slint#15205).
+export global Surface {
+    in property <int> epoch;
+}
+
 // A floating pane (.glass): the log drawer, the settings sheet and the dialog card. While
 // `Theme.glass` holds, the real backdrop blur under the thinner glass-float; otherwise faked, as
 // style.css fakes it, with the near opaque float. Either way the edge, a top highlight
