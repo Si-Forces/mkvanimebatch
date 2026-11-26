@@ -757,4 +757,82 @@ mod tests {
         );
         app.hide().unwrap();
     }
+
+    /// A followed line that wraps taller than the console shows its end, 8px above the
+    /// console's bottom, as log-view.js scrolls to the bottom (#253).
+    #[test]
+    fn a_followed_line_taller_than_the_console_shows_its_end() {
+        use i_slint_backend_testing::AccessibleLiveness;
+        let runtime = runtime();
+        let (app, _core, publisher) = open_console(&runtime);
+        app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+        publisher.show_logs(&[notes(0, 0, 0, 0, 200)]);
+        frames(&app);
+        let tall = "word ".repeat(1500);
+        publisher.show_logs(&[batch(0, 200, 0, &[(LogKind::Note, tall.as_str())])]);
+        frames(&app);
+        let list = ElementHandle::find_by_accessible_label(&app, "Log")
+            .find(|element| element.accessible_live_region() == Some(AccessibleLiveness::Polite))
+            .unwrap();
+        let line = ElementHandle::find_by_accessible_label(&app, &tall)
+            .next()
+            .unwrap();
+        assert!(
+            line.size().height > list.size().height,
+            "the line is taller than the console"
+        );
+        let under = || {
+            list.absolute_position().y + list.size().height
+                - (line.absolute_position().y + line.size().height)
+        };
+        // The list estimates the rows above from the tall one, so positions run to about half a
+        // million px, where f32 steps are about 0.03px.
+        assert!(
+            (under() - 8.0).abs() < 0.1,
+            "the line's end, followed: {}",
+            under()
+        );
+        frames(&app);
+        assert!((under() - 8.0).abs() < 0.1, "and it stays: {}", under());
+
+        // Past the settling window, a taller view, then a narrower one (the lines wrap taller)
+        // still show the end.
+        mock_elapsed_time(Duration::from_millis(600));
+        app.window().set_size(slint::LogicalSize::new(760.0, 600.0));
+        frames(&app);
+        assert!((under() - 8.0).abs() < 0.1, "a taller view: {}", under());
+        mock_elapsed_time(Duration::from_millis(600));
+        app.window().set_size(slint::LogicalSize::new(700.0, 600.0));
+        frames(&app);
+        assert!((under() - 8.0).abs() < 0.1, "a narrower view: {}", under());
+        app.hide().unwrap();
+    }
+
+    /// A new generation's clear that lands in one hop with a first line taller than the console
+    /// shows that line's end.
+    #[test]
+    fn a_coalesced_clear_and_a_tall_line_show_its_end() {
+        use i_slint_backend_testing::AccessibleLiveness;
+        let runtime = runtime();
+        let (app, _core, publisher) = open_console(&runtime);
+        app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+        publisher.show_logs(&[notes(0, 0, 0, 0, 200)]);
+        frames(&app);
+        let tall = "word ".repeat(1500);
+        publisher.show_logs(&[
+            notes(1, 0, 0, 0, 0),
+            batch(1, 0, 0, &[(LogKind::Note, tall.as_str())]),
+        ]);
+        frames(&app);
+        let list = ElementHandle::find_by_accessible_label(&app, "Log")
+            .find(|element| element.accessible_live_region() == Some(AccessibleLiveness::Polite))
+            .unwrap();
+        let line = ElementHandle::find_by_accessible_label(&app, &tall)
+            .next()
+            .unwrap();
+        let under = list.absolute_position().y + list.size().height
+            - (line.absolute_position().y + line.size().height);
+        assert!((under - 8.0).abs() < 0.1, "the line's end: {under}");
+        app.hide().unwrap();
+    }
 }

@@ -93,25 +93,48 @@ component LogConsole inherits Rectangle {
     in property <[LogRow]> rows;
     in property <LogSerials> serials;
     property <bool> follow: true;
-    // The host wrote lines the list has not laid out yet. `ensure-row-visible` measures the rows
-    // laid out last, so a layout that then moves the view off the bottom (rows dropped above keep
-    // the rows shown, as at the cap) shows the newest row again. A scroll ends it.
+    // The host wrote lines, or the view changed size, in the last 500ms. Until then each layout
+    // that leaves the view off the bottom (rows laid out that were only estimated, rows dropped
+    // above as at the cap, a tall newest row shown from its top) sends it on to the newest line's
+    // end. A scroll ends it; past it, a scrollbar arrow or the wheel over its strip (they do not
+    // fire `scrolled`) is left where it goes.
+    // ponytail: a layout delayed past the window (a minimised window) can leave a tall newest
+    // line at its top until the next line; a pass that ends on the layout itself would need a hook
+    // Slint 1.19 does not have.
     property <bool> settling;
+    settle-timer := Timer {
+        interval: 500ms;
+        running: root.settling;
+        triggered => {
+            root.settling = false;
+        }
+    }
+    property <bool> at-bottom: -list.content-y + list.visible-height >= list.content-height - 1px;
     // The host wrote into the lines: a new generation follows again, then the newest line is
-    // shown while following. One handler for both, as a second `ensure-row-visible` before the
-    // layout would cancel the first: it measures the old rows under the new offset.
+    // brought in while following. One handler for both, so a clear and lines in one hop bring the
+    // newest row in once, measured against the new rows.
     property <int> cleared;
     changed serials => {
         if root.serials.cleared != root.cleared {
             root.cleared = root.serials.cleared;
             root.follow = true;
         }
-        root.settling = true;
-        root.to-newest();
-    }
-    function to-newest() {
+        root.settle();
         if root.follow && root.rows.length > 0 {
             list.ensure-row-visible(root.rows.length - 1, ScrollBehavior.instant);
+        }
+    }
+    function settle() {
+        root.settling = true;
+        settle-timer.restart();
+    }
+    // The newest line's end, as log-view.js scrolls to the bottom (#253): exact once the last row
+    // is laid out, else the layout that lays it out moves the view again. Only the serials handler
+    // calls `ensure-row-visible`, which brings in a row not laid out yet but shows a row taller
+    // than the view from its top, so no pass leaves a request that could outlast the window.
+    function to-bottom() {
+        if root.follow && !root.at-bottom {
+            list.content-y = min(0px, list.visible-height - list.content-height);
         }
     }
     if root.rows.length == 0: Text {
@@ -138,12 +161,26 @@ component LogConsole inherits Rectangle {
             root.settling = false;
             root.follow = -self.content-y + self.visible-height >= self.content-height - 32px;
         }
-        // Lines laid out (or the view resized) while following: the newest is shown, measured.
-        changed content-height => { root.to-newest(); }
+        // A new width re-wraps the lines in the next layout, whose height change then moves the
+        // view; a width that wraps nothing anew leaves it where it is.
+        changed visible-width => {
+            root.settle();
+        }
+        // A new height while following: the newest line's end is shown.
+        changed visible-height => {
+            root.settle();
+            root.to-bottom();
+        }
+        // A layout changes the height estimate, as a scrollbar arrow step can too, so this corrects
+        // only inside the window and does not arm it.
+        changed content-height => {
+            if root.settling {
+                root.to-bottom();
+            }
+        }
         changed content-y => {
-            if root.settling && -self.content-y + self.visible-height < self.content-height - 1px {
-                root.settling = false;
-                root.to-newest();
+            if root.settling {
+                root.to-bottom();
             }
         }
         // 12px mono at about .log-body's 1.6 line height: a line's Text rounds 19.2px up to 20.
