@@ -14,6 +14,8 @@ mod queue;
 mod renderer;
 mod run_log;
 mod settings;
+#[cfg(test)]
+mod surface_skia_tests;
 mod telemetry;
 #[cfg(test)]
 mod ui_tests;
