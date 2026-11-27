@@ -2891,7 +2891,7 @@ fn the_sheet_keeps_the_focus_and_its_fields_take_typed_keys() {
 /// theme and save the choice; a saved choice applies before the window shows.
 #[test]
 fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
-    use crate::appearance::{self, Appearance};
+    use crate::appearance::Appearance;
     use crate::renderer::Renderer;
     use slint::platform::{Key, WindowEvent};
     i_slint_backend_testing::init_no_event_loop();
@@ -2901,7 +2901,7 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
     app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
     let theme = app.global::<Theme>();
     theme.invoke_set_dark(true);
-    appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
+    wire_appearance(&app, dir.path(), Renderer::OpenGl);
     // Applied before the first frame.
     assert!(!theme.get_dark());
     apply(&app, &ViewState::new(None));
@@ -2984,13 +2984,13 @@ fn the_toggle_and_ctrl_t_flip_the_theme_and_save_the_choice() {
 /// renderer does; the panes still follow `Theme.glass` (the Log drawer's blur reads it).
 #[test]
 fn the_reduced_effects_apply_at_once_and_are_saved() {
-    use crate::appearance::{self, Appearance};
+    use crate::appearance::Appearance;
     use crate::renderer::Renderer;
     i_slint_backend_testing::init_no_event_loop();
     let dir = tempfile::tempdir().unwrap();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
-    appearance::wire(&app, Some(dir.path().into()), Renderer::OpenGl);
+    wire_appearance(&app, dir.path(), Renderer::OpenGl);
     let theme = app.global::<Theme>();
     assert!(!theme.get_glass());
     assert!(theme.get_float().alpha() < 255, "the faked glass");
@@ -3009,28 +3009,285 @@ fn the_reduced_effects_apply_at_once_and_are_saved() {
     assert!(!theme.get_glass());
     assert_eq!(theme.get_float().alpha(), 255);
     assert_eq!(app.get_log_blur(), 0.0);
+    // Clicking one checkbox saves only that effect; the other stays unset (`system`).
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: None,
+            reduce_transparency: Some(true),
+            reduce_motion: None,
+        }
+    );
     only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
     assert!(theme.get_reduce_motion());
     assert_eq!(
         Appearance::load(dir.path()),
         Appearance {
             dark: None,
-            reduce_transparency: true,
-            reduce_motion: true,
+            reduce_transparency: Some(true),
+            reduce_motion: Some(true),
         }
     );
     only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
     assert!(theme.get_float().alpha() < 255, "the faked glass again");
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: None,
+            reduce_transparency: Some(false),
+            reduce_motion: Some(true),
+        }
+    );
     app.hide().unwrap();
 
     // A restart on the software renderer keeps the saved effects and draws no glass.
     let app = new_app();
-    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    wire_appearance(&app, dir.path(), Renderer::Software);
     let theme = app.global::<Theme>();
     assert!(theme.get_reduce_motion() && !theme.get_reduce_transparency());
     assert!(!theme.get_glass());
     assert!(theme.get_float().alpha() < 255, "the faked glass");
     assert_eq!(app.get_log_blur(), 0.0);
+}
+
+/// OS-seeded reduced effects apply before the first frame without being saved; changing the theme
+/// keeps unset effects as `system`, clicking one checkbox saves only that effect, and a saved
+/// `false` beats the OS on restart.
+#[test]
+fn os_seeded_effects_show_without_saving_and_a_theme_change_keeps_them_unset() {
+    use crate::appearance::{self, Appearance, OsEffects};
+    use crate::renderer::Renderer;
+    i_slint_backend_testing::init_no_event_loop();
+    let dir = tempfile::tempdir().unwrap();
+    let os_on = OsEffects {
+        reduce_transparency: true,
+        reduce_motion: true,
+    };
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    appearance::wire_with_os(&app, Some(dir.path().into()), Renderer::OpenGl, os_on);
+    let theme = app.global::<Theme>();
+    assert!(theme.get_reduce_transparency() && theme.get_reduce_motion());
+    assert_eq!(theme.get_float().alpha(), 255, "solid panes from OS seed");
+    assert!(
+        !dir.path().join("appearance").exists(),
+        "OS seed is shown, never written"
+    );
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    // Theme changes (toggle and menu pick) write `system` for unset effects.
+    only(&app, "Toggle theme").invoke_accessible_default_action();
+    let text = std::fs::read_to_string(dir.path().join("appearance")).unwrap();
+    assert!(text.contains("reduce-transparency=system\n"), "{text}");
+    assert!(text.contains("reduce-motion=system\n"), "{text}");
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: Some(theme.get_dark()),
+            reduce_transparency: None,
+            reduce_motion: None,
+        }
+    );
+
+    appearance_button(&app).invoke_accessible_default_action();
+    ElementHandle::find_by_accessible_label(&app, "System")
+        .find(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::RadioButton))
+        .unwrap()
+        .invoke_accessible_default_action();
+    assert_eq!(Appearance::load(dir.path()), Appearance::default());
+
+    // Unchecking Reduce transparency saves only that effect as `false`; motion stays unset.
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(!theme.get_reduce_transparency());
+    assert!(theme.get_reduce_motion());
+    assert!(theme.get_float().alpha() < 255);
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: None,
+            reduce_transparency: Some(false),
+            reduce_motion: None,
+        }
+    );
+    app.hide().unwrap();
+
+    // Restarting with the same OS preferences: saved `false` wins, unset motion still takes OS.
+    let app = new_app();
+    appearance::wire_with_os(&app, Some(dir.path().into()), Renderer::OpenGl, os_on);
+    let theme = app.global::<Theme>();
+    assert!(!theme.get_reduce_transparency());
+    assert!(theme.get_reduce_motion());
+}
+
+/// A late Linux XDG portal motion seed applies while Reduce motion is unset (without saving it,
+/// and without turning it into a saved choice when the other checkbox or theme changes), and is
+/// ignored once the user has clicked Reduce motion.
+#[test]
+fn a_late_os_motion_seed_applies_while_unset_and_is_ignored_after_a_click() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    i_slint_backend_testing::init_no_event_loop();
+
+    // Part 1: applied while unset, even after clicking the other checkbox.
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let state = wire_appearance(&app, dir.path(), Renderer::OpenGl);
+    let theme = app.global::<Theme>();
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    appearance_button(&app).invoke_accessible_default_action();
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(!theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, None);
+    // Close the menu so the late seed arrives while no checkbox is visible.
+    appearance_button(&app).invoke_accessible_default_action();
+    assert!(!app.get_appearance_open());
+
+    appearance::seed_motion(&app, &state, true);
+    assert!(theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, None);
+
+    // Clicking Reduce transparency again keeps the late-seeded motion unset (`system`).
+    appearance_button(&app).invoke_accessible_default_action();
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_motion());
+    assert_eq!(
+        Appearance::load(dir.path()),
+        Appearance {
+            dark: None,
+            reduce_transparency: Some(false),
+            reduce_motion: None,
+        }
+    );
+
+    // Clicking Reduce motion turns the seeded `true` into a saved `false`.
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
+    assert!(!theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, Some(false));
+    app.hide().unwrap();
+
+    // Part 2: ignored once the user already clicked Reduce motion before the seed arrives.
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let state = wire_appearance(&app, dir.path(), Renderer::OpenGl);
+    let theme = app.global::<Theme>();
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    appearance_button(&app).invoke_accessible_default_action();
+    // Click twice: false -> true -> false (an explicit saved `false`).
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
+    assert!(!theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, Some(false));
+    appearance_button(&app).invoke_accessible_default_action();
+    assert!(!app.get_appearance_open());
+
+    appearance::seed_motion(&app, &state, true);
+    assert!(
+        !theme.get_reduce_motion(),
+        "saved choice wins over late OS seed"
+    );
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, Some(false));
+
+    // And a saved `true` is not cleared by a late `false` seed.
+    appearance_button(&app).invoke_accessible_default_action();
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_motion());
+    appearance_button(&app).invoke_accessible_default_action();
+    assert!(!app.get_appearance_open());
+    appearance::seed_motion(&app, &state, false);
+    assert!(theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, Some(true));
+    app.hide().unwrap();
+}
+
+/// A late portal reply that arrives while the Appearance menu is open waits for it to close without
+/// touching `Theme` or `state.os`, so it never flips a checkbox under the pointer or causes a click
+/// on the other checkbox to save a stale value; then it applies only while the effect is unset.
+#[test]
+fn a_late_os_motion_seed_never_flips_a_checkbox_under_the_pointer() {
+    use crate::appearance::{self, Appearance};
+    use crate::renderer::Renderer;
+    i_slint_backend_testing::init_no_event_loop();
+
+    // Pressing Reduce motion while a late seed arrives still toggles it on and saves `Some(true)`.
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let state = wire_appearance(&app, dir.path(), Renderer::OpenGl);
+    let theme = app.global::<Theme>();
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    appearance_button(&app).invoke_accessible_default_action();
+    frame(&app);
+    assert!(app.get_appearance_open());
+
+    let checkbox = only(&app, "Reduce motion (fewer animations)");
+    let at = checkbox.absolute_position();
+    let size = checkbox.size();
+    let center = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    press_left_at(&app, center);
+    appearance::seed_motion(&app, &state, true);
+    assert!(!theme.get_reduce_motion());
+    release_left_at(&app, center);
+
+    assert!(theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, Some(true));
+    // A choice made while a reply waits beats it once the menu closes.
+    only(&app, "Reduce motion (fewer animations)").invoke_accessible_default_action();
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, Some(false));
+    appearance_button(&app).invoke_accessible_default_action();
+    frame(&app);
+    assert!(!app.get_appearance_open());
+    assert!(!theme.get_reduce_motion());
+    app.hide().unwrap();
+
+    // Clicking the other checkbox while a reply waits keeps motion unset; the reply applies as the
+    // menu closes, and stays unsaved.
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app();
+    app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
+    let state = wire_appearance(&app, dir.path(), Renderer::OpenGl);
+    let theme = app.global::<Theme>();
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+
+    appearance_button(&app).invoke_accessible_default_action();
+    frame(&app);
+    appearance::seed_motion(&app, &state, true);
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(!theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, None);
+    appearance_button(&app).invoke_accessible_default_action();
+    frame(&app);
+    assert!(!app.get_appearance_open());
+    assert!(theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, None);
+    appearance_button(&app).invoke_accessible_default_action();
+    only(&app, "Reduce transparency (solid panes)").invoke_accessible_default_action();
+    assert!(theme.get_reduce_motion());
+    assert_eq!(Appearance::load(dir.path()).reduce_motion, None);
+    app.hide().unwrap();
+}
+
+/// Wires appearance against `dir` with no OS preferences, for deterministic UI tests.
+fn wire_appearance(
+    app: &App,
+    dir: &std::path::Path,
+    renderer: crate::renderer::Renderer,
+) -> std::rc::Rc<std::cell::Cell<crate::appearance::State>> {
+    crate::appearance::wire_with_os(
+        app,
+        Some(dir.into()),
+        renderer,
+        crate::appearance::OsEffects::default(),
+    )
 }
 
 /// The title bar's Appearance button (its menu is labelled the same).
@@ -3179,7 +3436,7 @@ fn the_appearance_menu_opens_from_its_button_and_closes_every_way() {
 /// menu's choice follows them while open. A saved System applies as the window starts.
 #[test]
 fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
-    use crate::appearance::{self, Appearance};
+    use crate::appearance::Appearance;
     use crate::renderer::Renderer;
     use i_slint_core::items::ColorScheme;
     use i_slint_core::window::WindowInner;
@@ -3188,7 +3445,7 @@ fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
     std::fs::write(dir.path().join("appearance"), "theme=dark\n").unwrap();
     let app = new_app();
     app.window().set_size(slint::LogicalSize::new(760.0, 520.0));
-    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    wire_appearance(&app, dir.path(), Renderer::Software);
     let theme = app.global::<Theme>();
     assert!(theme.get_dark() && !theme.get_follows_system());
     apply(&app, &ViewState::new(None));
@@ -3247,7 +3504,7 @@ fn the_appearance_menu_picks_system_light_or_dark_and_saves_it() {
 
     // A restart with System saved follows the system's from the start, the menu saying so.
     let app = new_app();
-    appearance::wire(&app, Some(dir.path().into()), Renderer::Software);
+    wire_appearance(&app, dir.path(), Renderer::Software);
     let theme = app.global::<Theme>();
     assert!(theme.get_follows_system());
     WindowInner::from_pub(app.window())
