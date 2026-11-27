@@ -352,6 +352,9 @@ export component Pressable inherits Rectangle {
     // The modal layer it sits in (`Focus.modal`): 1 in the settings sheet, 2 in the dialog.
     in property <int> layer;
     in property <MouseCursor> cursor: MouseCursor.pointer;
+    // The cursor while disabled (style.css `button:disabled`); CheckBox's label keeps the default
+    // one, as its box alone shows not-allowed.
+    in property <MouseCursor> disabled-cursor: not-allowed;
     callback clicked();
     // Every pointer event over it, after a left press took the focus.
     callback pointer(event: PointerEvent);
@@ -429,7 +432,7 @@ export component Pressable inherits Rectangle {
     }
     touch := TipArea {
         enabled: root.enabled;
-        mouse-cursor: root.enabled ? root.cursor : not-allowed;
+        mouse-cursor: root.cursor;
         tip: root.tip;
         owner: root.tip-owner;
         // A left press takes the focus, as a browser's button does, without a ring.
@@ -447,13 +450,23 @@ export component Pressable inherits Rectangle {
             }
         }
     }
-    // A disabled TouchArea reports no hover; keep the tooltip and not-allowed cursor (style.css
-    // `button:disabled`) active for disabled buttons (e.g. Run remux before a folder is open).
+    // A disabled TouchArea sets no cursor: a disabled control without a tooltip shows its cursor
+    // here, one with a tooltip in the TipArea over it. Always made, as an `if` would change the
+    // control's own size. No layer check: the sheet's and the dialog's backdrops cover the window,
+    // so no new hover or press reaches a control under them (a press already held keeps its grab
+    // until release, as any TouchArea's); the Appearance menu is no layer, and its outside-click
+    // area covers the window too.
+    TouchArea {
+        enabled: !root.enabled;
+        mouse-cursor: root.disabled-cursor;
+    }
+    // A disabled TouchArea reports no hover; keep the tooltip and the disabled cursor active for
+    // disabled buttons with a tooltip (e.g. Run remux before a folder is open).
     // Always made, off while enabled: a button enabled under a resting pointer hides the card.
     TipArea {
         tip: root.enabled ? "" : root.tip;
         owner: root.tip-owner;
-        mouse-cursor: not-allowed;
+        mouse-cursor: root.disabled-cursor;
     }
     @children
     if root.draws-ring && root.ring: FocusRing {
@@ -475,6 +488,7 @@ export component CheckBox inherits Pressable {
     height: max(20px, row.preferred-height);
     border-radius: 6px;
     cursor: default;
+    disabled-cursor: default;
     activate-on-return: false;
     draws-ring: false;
     accessible-role: checkbox;
@@ -967,6 +981,12 @@ export component TextField inherits Rectangle {
                 accepted => { root.accepted(self.text); }
             }
         }
+    }
+
+    // A disabled TouchArea sets no cursor: style.css `input:disabled { cursor: not-allowed }`.
+    // No layer check, as Pressable's: the backdrops of the sheet and the dialog cover the window.
+    if !root.enabled: TouchArea {
+        mouse-cursor: not-allowed;
     }
 
     if root.has-focus: FocusRing {
