@@ -149,8 +149,8 @@ export component App inherits Window {
     min-width: 760px;
     min-height: 520px;
     no-frame: true;
-    // The window icon on every OS (the Tauri app's; the exe's on Windows comes from build.rs).
-    icon: @image-url("../../desktop-tauri/src-tauri/icons/128x128.png");
+    // The window icon on every OS (the exe's on Windows comes from build.rs).
+    icon: @image-url("../icons/128x128.png");
     // Rounded corners (the host's: Linux alone, as the webview's is-linux styling). Transparent
     // outside the rounded surface then, as the Linux webview window is; opaque and square
     // elsewhere, as tauri.conf.json's Windows window.

@@ -13,6 +13,9 @@
 #       "### Downloads" subsection are dropped, other "###" headings become "##".
 #   scripts/release-body.sh page <version> <bundle-dir> [notes-file]
 #       Print the full release page. Needs WEBKIT, JSC and GTK in the environment.
+#   scripts/release-body.sh prerelease-page <tag> <bundle-dir> [cargo-toml]
+#       Print the Slint preview pre-release page for tag slint-preview.<N>.
+#       Needs TRACKING_ISSUE (a positive GitHub issue number) in the environment.
 #
 # <version> has no leading "v" and is matched literally against the heading.
 
@@ -134,6 +137,110 @@ EOF
   printf '| `libgtk-3.so.0` | `%s` |\n' "$GTK"
 }
 
+prerelease_page() {
+  local tag="$1" dir="$2" cargo_toml="$3" n cargo_version file_ver deb rpm appimage f
+  if [[ ! "$tag" =~ ^slint-preview\.([0-9]+)$ ]]; then
+    echo "::error::the pre-release tag is not of the form slint-preview.<N>" >&2
+    return 1
+  fi
+  n="${BASH_REMATCH[1]}"
+
+  if [ -z "${TRACKING_ISSUE:-}" ]; then
+    echo "::error::TRACKING_ISSUE is not set" >&2
+    return 1
+  fi
+  if [[ ! "$TRACKING_ISSUE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "::error::TRACKING_ISSUE must be a positive issue number" >&2
+    return 1
+  fi
+
+  if [ ! -f "$cargo_toml" ] || [ ! -r "$cargo_toml" ]; then
+    echo "::error::could not read $cargo_toml" >&2
+    return 1
+  fi
+  cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$cargo_toml")"
+  cargo_version="${cargo_version%%$'\n'*}"
+  if [ -z "$cargo_version" ]; then
+    echo "::error::could not read workspace version from $cargo_toml" >&2
+    return 1
+  fi
+  file_ver="${cargo_version}-slint.${n}"
+
+  deb="mkv-anime-batch-slint_${file_ver}_amd64.deb"
+  rpm="mkv-anime-batch-slint-${file_ver}-1.x86_64.rpm"
+  appimage="mkv-anime-batch-slint-${file_ver}-x86_64.AppImage"
+  for f in "$deb" "$rpm" "$appimage" SHA256SUMS; do
+    if [ ! -e "$dir/$f" ]; then
+      echo "::error::expected bundle $dir/$f is missing" >&2
+      return 1
+    fi
+  done
+
+  cat <<'EOF'
+This pre-release is a Linux preview of the native Slint desktop app (`mkv-anime-batch-slint`), built to test it — especially on NVIDIA GPUs — before it replaces the Tauri / WebKitGTK desktop app.
+
+It installs side-by-side with the existing `mkv-anime-batch` package under the launcher name **MKV Anime Batch (Slint preview)**, sharing configuration and logs under `com.mkvanimebatch.desktop`.
+
+## Downloads
+
+| File | Description |
+|------|-------------|
+EOF
+  printf '| `%s` | Desktop app for Debian and Ubuntu (x86_64) |\n' "$deb"
+  printf '| `%s` | Desktop app for Fedora (x86_64) |\n' "$rpm"
+  printf '| `%s` | Portable AppImage for Linux (x86_64) |\n' "$appimage"
+  cat <<'EOF'
+| `SHA256SUMS` | SHA-256 checksums for the packages above |
+
+## Install
+
+```bash
+# Verify checksums (optional)
+sha256sum --ignore-missing -c SHA256SUMS
+
+# Debian / Ubuntu
+EOF
+  printf 'sudo apt install ./%s\n\n' "$deb"
+  cat <<'EOF'
+# Fedora
+EOF
+  printf 'sudo dnf install ./%s\n\n' "$rpm"
+  cat <<'EOF'
+# AppImage
+EOF
+  printf 'chmod +x %s\n' "$appimage"
+  printf './%s\n' "$appimage"
+  cat <<'EOF'
+```
+
+External media tools are still required on your `PATH`: `mkvmerge` and `mkvextract` ([MKVToolNix](https://mkvtoolnix.download/)), and `ffmpeg` with `libopus` ([FFmpeg](https://ffmpeg.org/)).
+
+## Supported systems
+
+Built on Ubuntu 24.04 (`glibc` 2.39): **Ubuntu 24.04+**, **Debian 13+**, and **Fedora 40+** (`glibc` 2.39+) on `x86_64`. The `.deb` and `.rpm` declare their required system libraries; the AppImage bundles no shared libraries and expects them to be installed on the host.
+
+## Tester checklist
+
+- [ ] Launches cleanly (from the application menu and/or terminal)
+- [ ] Custom title bar works (drag, resize, minimize, maximize, close, theme and Appearance menu)
+- [ ] Both **Remux** and **Extract** modes scan and display a folder
+- [ ] One batch run completes cleanly
+- [ ] Note whether OpenGL started directly or it fell back to the software renderer — check stderr or `$XDG_DATA_HOME/com.mkvanimebatch.desktop/logs/mkv-anime-batch.log` (`~/.local/share` when `XDG_DATA_HOME` is unset). `MKV_RENDERER=software` forces software mode and `MKV_RENDERER=opengl` retries OpenGL. The offer to restart in software mode after an OpenGL failure needs `zenity` or `kdialog`; without either the app just exits, so retry with `MKV_RENDERER=software`.
+
+## Reporting results
+
+EOF
+  printf 'Please post your distro, desktop/session (Wayland or X11), GPU and driver version, and checklist results in [#%s](https://github.com/Si-Forces/mkvanimebatch/issues/%s).\n\n' \
+    "$TRACKING_ISSUE" "$TRACKING_ISSUE"
+  cat <<'EOF'
+## Built with Slint
+
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/v1.19.0/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)
+
+The desktop UI is built with [Slint](https://slint.dev), used under the [Slint Royalty-free 2.0 license](https://github.com/slint-ui/slint/blob/v1.19.0/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md).
+EOF
+}
+
 check() {
   local tag="$1" commit="$2" version cargo_version remote
   # The tag can come from a dispatch input and reaches the ::error:: lines below, so
@@ -183,8 +290,12 @@ case "${1:-}" in
     [ $# -ge 3 ] && [ $# -le 4 ] || { echo "usage: $0 page <version> <bundle-dir> [notes-file]" >&2; exit 2; }
     page "$2" "$3" "${4:-$root/docs/release-notes.md}"
     ;;
+  prerelease-page)
+    [ $# -ge 3 ] && [ $# -le 4 ] || { echo "usage: $0 prerelease-page <tag> <bundle-dir> [cargo-toml]" >&2; exit 2; }
+    prerelease_page "$2" "$3" "${4:-$root/Cargo.toml}"
+    ;;
   *)
-    echo "usage: $0 check <tag> <commit> | notes <version> [notes-file] | page <version> <bundle-dir> [notes-file]" >&2
+    echo "usage: $0 check <tag> <commit> | notes <version> [notes-file] | page <version> <bundle-dir> [notes-file] | prerelease-page <tag> <bundle-dir> [cargo-toml]" >&2
     exit 2
     ;;
 esac

@@ -38,6 +38,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// XDG desktop entry / Wayland app id and X11 WM_CLASS (ADR-0017, 2026-11-27 amendment).
+/// Installs beside the shipped `mkv-anime-batch` package until P9 renames it.
+const APP_ID: &str = "mkv-anime-batch-slint";
+
 fn main() -> Result<(), Box<dyn Error>> {
     let log_failed = diagnostics::init(diagnostics::log_dir().as_deref());
 
@@ -60,6 +64,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 choice.renderer.slint_name()
             )
         })?;
+    // Must run after platform selection (the Slint context exists) and before the window is made.
+    if let Err(error) = slint::set_xdg_app_id(APP_ID) {
+        tracing::warn!("Cannot set the XDG app id: {error}");
+    }
     if choice.renderer == Renderer::Software {
         let why = match (relaunched, forced) {
             (true, _) => "restarted after a GPU failure".to_string(),
@@ -681,5 +689,26 @@ mod tests {
             assert_eq!(tip.get_press_serial(), serial, "{event:?} press-serial");
             assert_eq!(tip.get_held(), held, "{event:?} held");
         }
+    }
+
+    #[test]
+    fn desktop_entry_matches_app_id() {
+        let rel = format!("packaging/{APP_ID}.desktop");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&rel);
+        assert!(
+            path.is_file(),
+            "expected desktop entry at {}",
+            path.display()
+        );
+        let desktop = include_str!("../packaging/mkv-anime-batch-slint.desktop");
+        let field = |key: &str| {
+            desktop
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .unwrap_or_else(|| panic!("missing {key}= in {rel}"))
+        };
+        assert_eq!(field("Exec"), APP_ID);
+        assert_eq!(field("Icon"), APP_ID);
+        assert_eq!(field("StartupWMClass"), APP_ID);
     }
 }
