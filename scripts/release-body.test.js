@@ -227,3 +227,130 @@ test("check fails closed when origin cannot be listed", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /::error::could not list tag v2\.0\.0 on origin/);
 });
+
+const cargoFixture = version => {
+  const dir = fs.mkdtempSync(path.join(tmp, "cargo-"));
+  const file = path.join(dir, "Cargo.toml");
+  fs.writeFileSync(file, `[workspace.package]\nversion = "${version}"\n`);
+  return file;
+};
+const prereleaseBundles = fileVer => [
+  `mkv-anime-batch-slint_${fileVer}_amd64.deb`,
+  `mkv-anime-batch-slint-${fileVer}-1.x86_64.rpm`,
+  `mkv-anime-batch-slint-${fileVer}-x86_64.AppImage`,
+  "SHA256SUMS",
+];
+
+test("prerelease-page renders downloads, install commands, floor, checklist, issue link and Slint badge", () => {
+  const fileVer = "2.0.0-slint.3";
+  const files = prereleaseBundles(fileVer);
+  const r = run(
+    ["prerelease-page", "slint-preview.3", bundleDir(files), cargoFixture("2.0.0")],
+    { TRACKING_ISSUE: "270" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  for (const n of files) assert.ok(r.stdout.includes(`| \`${n}\` |`), n);
+  assert.ok(r.stdout.includes("sha256sum --ignore-missing -c SHA256SUMS"));
+  assert.ok(r.stdout.includes("needs `zenity` or `kdialog`"));
+  assert.ok(r.stdout.includes(`sudo apt install ./${files[0]}`));
+  assert.ok(r.stdout.includes(`sudo dnf install ./${files[1]}`));
+  assert.ok(r.stdout.includes(`chmod +x ${files[2]}`));
+  assert.ok(r.stdout.includes("Ubuntu 24.04+"));
+  assert.ok(r.stdout.includes("Debian 13+"));
+  assert.ok(r.stdout.includes("Fedora 40+"));
+  assert.ok(r.stdout.includes("`glibc` 2.39+"));
+  assert.ok(!r.stdout.includes("RHEL"));
+  assert.ok(!r.stdout.includes("harfbuzz"));
+  assert.ok(r.stdout.includes("software renderer"));
+  assert.ok(r.stdout.includes("(`~/.local/share` when `XDG_DATA_HOME` is unset)"));
+  assert.ok(r.stdout.includes("https://github.com/Si-Forces/mkvanimebatch/issues/270"));
+  assert.ok(r.stdout.includes("https://raw.githubusercontent.com/slint-ui/slint/v1.19.0/logo/MadeWithSlint-logo-whitebg.png"));
+  assert.ok(r.stdout.includes("](https://slint.dev)"));
+  assert.ok(r.stdout.includes("https://github.com/slint-ui/slint/blob/v1.19.0/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"));
+});
+
+test("prerelease-page uses GitHub-safe file names with no '~'", () => {
+  const files = prereleaseBundles("2.0.0-slint.3");
+  const r = run(
+    ["prerelease-page", "slint-preview.3", bundleDir(files), cargoFixture("2.0.0")],
+    { TRACKING_ISSUE: "270" },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const tableFiles = [...r.stdout.matchAll(/^\| `([^`]+)` \|/gm)].map(m => m[1]);
+  assert.deepEqual(tableFiles, files);
+  for (const name of tableFiles) {
+    assert.ok(!name.includes("~"), `unexpected '~' in download file name: ${name}`);
+  }
+  const installBlock = r.stdout.match(/## Install\n\n```bash\n([\s\S]*?)\n```/)?.[1] ?? "";
+  assert.ok(installBlock.length > 0, "missing Install block");
+  assert.ok(!installBlock.includes("~"), "unexpected '~' in Install commands");
+});
+
+test("prerelease-page fails when a bundle is missing", () => {
+  const files = prereleaseBundles("2.0.0-slint.1").slice(0, 2);
+  const r = run(
+    ["prerelease-page", "slint-preview.1", bundleDir(files), cargoFixture("2.0.0")],
+    { TRACKING_ISSUE: "270" },
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /::error::expected bundle .*\.AppImage is missing/);
+});
+
+test("prerelease-page fails when SHA256SUMS is missing", () => {
+  const files = prereleaseBundles("2.0.0-slint.1").filter(n => n !== "SHA256SUMS");
+  const r = run(
+    ["prerelease-page", "slint-preview.1", bundleDir(files), cargoFixture("2.0.0")],
+    { TRACKING_ISSUE: "270" },
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /::error::expected bundle .*SHA256SUMS is missing/);
+});
+
+test("prerelease-page fails cleanly when cargo-toml is a directory", () => {
+  const files = prereleaseBundles("2.0.0-slint.1");
+  const r = run(
+    ["prerelease-page", "slint-preview.1", bundleDir(files), fs.mkdtempSync(path.join(tmp, "dir-"))],
+    { TRACKING_ISSUE: "270" },
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /::error::could not read /);
+  assert.doesNotMatch(r.stderr, /^sed:/m);
+});
+
+test("prerelease-page fails cleanly when cargo-toml is unreadable", () => {
+  const files = prereleaseBundles("2.0.0-slint.1");
+  const r = run(
+    ["prerelease-page", "slint-preview.1", bundleDir(files), path.join(tmp, "does-not-exist.toml")],
+    { TRACKING_ISSUE: "270" },
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /::error::could not read /);
+  assert.doesNotMatch(r.stderr, /^sed:/m);
+});
+
+test("prerelease-page fails when TRACKING_ISSUE is missing or non-numeric", () => {
+  const files = prereleaseBundles("2.0.0-slint.1");
+  const dir = bundleDir(files);
+  const cargo = cargoFixture("2.0.0");
+
+  const missing = run(["prerelease-page", "slint-preview.1", dir, cargo], { TRACKING_ISSUE: "" });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /::error::TRACKING_ISSUE is not set/);
+
+  for (const bad of ["0", "abc", "12\n::warning::x"]) {
+    const r = run(["prerelease-page", "slint-preview.1", dir, cargo], { TRACKING_ISSUE: bad });
+    assert.notEqual(r.status, 0, bad);
+    assert.match(r.stderr, /::error::TRACKING_ISSUE must be a positive issue number/);
+  }
+});
+
+test("prerelease-page refuses a malformed tag", () => {
+  const files = prereleaseBundles("2.0.0-slint.1");
+  const dir = bundleDir(files);
+  const cargo = cargoFixture("2.0.0");
+  for (const tag of ["v2.0.0", "slint-preview.", "slint-preview.1\n::warning::x"]) {
+    const r = run(["prerelease-page", tag, dir, cargo], { TRACKING_ISSUE: "270" });
+    assert.notEqual(r.status, 0, tag);
+    assert.match(r.stderr, /::error::the pre-release tag is not of the form slint-preview\.<N>/);
+  }
+});

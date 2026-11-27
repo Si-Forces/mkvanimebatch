@@ -1,0 +1,491 @@
+name: Slint Pre-release
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview:
+        description: "Preview number N (tag slint-preview.N, pkg <workspace>~slint.N, files <workspace>-slint.N)"
+        type: number
+        required: true
+      publish:
+        description: "Publish the GitHub pre-release (off = dry run, upload artifacts only)"
+        type: boolean
+        default: false
+      tracking_issue:
+        description: "Tracking issue number for NVIDIA reports (required when publish is true)"
+        type: number
+        required: false
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "desktop-slint/Cargo.toml"
+      - "desktop-slint/icons/**"
+      - "desktop-slint/packaging/**"
+      - "desktop-slint/ui/fonts/OFL-*.txt"
+      - ".github/actions/install-linux-deps/**"
+      - ".github/workflows/slint-prerelease.yml"
+      - "scripts/release-body.sh"
+      - "scripts/release-body.test.js"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || format('preview-{0}', inputs.preview) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. Build and verify Linux packages (deb, rpm, AppImage)
+  # ────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build and Verify — Linux
+    runs-on: ubuntu-24.04
+    # A cold fat-LTO Slint + Skia release build can exceed 30 minutes; leave headroom.
+    timeout-minutes: 60
+    outputs:
+      preview: ${{ steps.meta.outputs.preview }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      pkg_version: ${{ steps.meta.outputs.pkg_version }}
+      file_version: ${{ steps.meta.outputs.file_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs and compute package version
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PREVIEW: ${{ inputs.preview }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_TRACKING_ISSUE: ${{ inputs.tracking_issue }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            preview="0"
+          else
+            preview="$INPUT_PREVIEW"
+          fi
+          if [[ ! "$preview" =~ ^[0-9]+$ ]]; then
+            echo "::error::preview must be a non-negative integer, got '$preview'"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_PUBLISH" = "true" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::publish is only allowed from refs/heads/main, got '$GITHUB_REF'"
+              exit 1
+            fi
+            if [[ ! "$INPUT_TRACKING_ISSUE" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::tracking_issue must be a positive issue number when publish is true"
+              exit 1
+            fi
+          fi
+
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          cargo_version="${cargo_version%%$'\n'*}"
+          if [ -z "$cargo_version" ]; then
+            echo "::error::could not read workspace version from Cargo.toml"
+            exit 1
+          fi
+
+          release_tag="slint-preview.${preview}"
+          pkg_version="${cargo_version}~slint.${preview}"
+          file_version="${cargo_version}-slint.${preview}"
+
+          # Fail before a long build if publishing a tag that already points at another commit.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_PUBLISH" = "true" ]; then
+            if ! ls_out="$(git ls-remote origin "refs/tags/$release_tag" "refs/tags/$release_tag^{}")"; then
+              echo "::error::could not list tag $release_tag on origin"
+              exit 1
+            fi
+            remote="$(T="refs/tags/$release_tag" awk '$2 == ENVIRON["T"] { tag = $1 } $2 == ENVIRON["T"] "^{}" { peeled = $1 }
+              END { print (peeled != "" ? peeled : tag) }' <<< "$ls_out")"
+            if [ -n "$remote" ] && [ "$remote" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $release_tag points at $remote, not at the built commit $GITHUB_SHA"
+              exit 1
+            fi
+          fi
+
+          {
+            echo "preview=$preview"
+            echo "release_tag=$release_tag"
+            echo "pkg_version=$pkg_version"
+            echo "file_version=$file_version"
+          } >> "$GITHUB_OUTPUT"
+
+      # Skia links libstdc++, fontconfig and freetype. `rpm` provides /usr/lib/rpm/find-requires
+      # so cargo-generate-rpm inspects DT_NEEDED rather than ldd's Ubuntu-specific transitive libs.
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/install-linux-deps
+        with:
+          packages: >-
+            build-essential curl libfontconfig-dev libfreetype-dev rpm
+
+      - name: Install Rust stable
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target "$TARGET"
+          rustup default stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: desktop-slint-prerelease-x86_64-unknown-linux-gnu
+
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-deb@3.8.0
+
+      # Not in install-action's manifest, so it falls back to cargo-binstall at the pinned version.
+      - name: Install cargo-generate-rpm
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-generate-rpm@0.21.1
+
+      - name: Build mkv-anime-batch-slint (Release)
+        run: cargo build --release --locked -p mkv-anime-batch-slint
+
+      - name: Build deb, rpm and AppImage packages
+        shell: bash
+        env:
+          PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
+          FILE_VERSION: ${{ steps.meta.outputs.file_version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          # Fallback value only feeds the prerelease-page smoke check below on PR and dry runs.
+          TRACKING_ISSUE: ${{ inputs.tracking_issue || '1' }}
+        run: |
+          dist=/tmp/slint-prerelease
+          rm -rf "$dist"
+          mkdir -p "$dist"
+
+          deb="mkv-anime-batch-slint_${FILE_VERSION}_amd64.deb"
+          rpm="mkv-anime-batch-slint-${FILE_VERSION}-1.x86_64.rpm"
+          appimage="mkv-anime-batch-slint-${FILE_VERSION}-x86_64.AppImage"
+
+          # Keep ~slint.N inside deb/rpm metadata for apt/dnf ordering, then rename the files to
+          # -slint.N because GitHub release uploads rename filenames containing '~'.
+          cargo deb --no-build -p mkv-anime-batch-slint --deb-version "$PKG_VERSION" --output "$dist"
+          mv "$dist/mkv-anime-batch-slint_${PKG_VERSION}_amd64.deb" "$dist/$deb"
+
+          cargo generate-rpm -p desktop-slint -s "version = \"$PKG_VERSION\"" -o "$dist"
+          mv "$dist/mkv-anime-batch-slint-${PKG_VERSION}-1.x86_64.rpm" "$dist/$rpm"
+
+          desktop-slint/packaging/build-appimage.sh target/release/mkv-anime-batch-slint "$FILE_VERSION" "$dist"
+
+          (
+            cd "$dist"
+            test -s "$deb"
+            test -s "$rpm"
+            test -s "$appimage"
+            sha256sum "$deb" "$rpm" "$appimage" > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+          # Smoke-check the pre-release page generator against the real built filenames.
+          scripts/release-body.sh prerelease-page "$RELEASE_TAG" "$dist" > /dev/null
+
+      - name: Verify deb package on Ubuntu 24.04
+        shell: bash
+        env:
+          PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
+          FILE_VERSION: ${{ steps.meta.outputs.file_version }}
+        run: |
+          deb="/tmp/slint-prerelease/mkv-anime-batch-slint_${FILE_VERSION}_amd64.deb"
+          deb_ver="$(dpkg-deb -f "$deb" Version)"
+          if [ "$deb_ver" != "$PKG_VERSION" ]; then
+            echo "::error::deb Version is '$deb_ver', expected '$PKG_VERSION'"
+            exit 1
+          fi
+
+          deps="$(dpkg-deb -f "$deb" Depends)"
+          echo "Depends: $deps"
+          dep_names="$(printf '%s\n' "$deps" | tr ',|' '\n' | sed -E 's/^[[:space:]]*([^[:space:](]+).*/\1/')"
+          for pkg in libegl1 libgl1 libwayland-client0 libwayland-egl1 libx11-6 libx11-xcb1 libxcb1 libxcursor1 libxi6 libxkbcommon0 libxkbcommon-x11-0; do
+            grep -Fxq "$pkg" <<< "$dep_names" || { echo "::error::deb Depends missing $pkg"; exit 1; }
+          done
+
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends "$deb"
+
+          ldd_out="$(ldd /usr/bin/mkv-anime-batch-slint)"
+          echo "$ldd_out"
+          if grep -q "not found" <<< "$ldd_out"; then
+            echo "::error::missing shared library in deb install"
+            exit 1
+          fi
+
+          test -x /usr/bin/mkv-anime-batch-slint
+          files="$(dpkg -L mkv-anime-batch-slint)"
+          echo "$files"
+          for expected in \
+            /usr/bin/mkv-anime-batch-slint \
+            /usr/share/applications/mkv-anime-batch-slint.desktop \
+            /usr/share/icons/hicolor/32x32/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/128x128/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/256x256/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/512x512/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/scalable/apps/mkv-anime-batch-slint.svg \
+            /usr/share/doc/mkv-anime-batch-slint/LICENSE \
+            /usr/share/doc/mkv-anime-batch-slint/OFL-JetBrainsMono.txt \
+            /usr/share/doc/mkv-anime-batch-slint/OFL-Onest.txt \
+            /usr/share/doc/mkv-anime-batch-slint/OFL-Unbounded.txt; do
+            grep -Fxq "$expected" <<< "$files" || { echo "::error::missing $expected in deb package list"; exit 1; }
+            test -f "$expected" || { echo "::error::missing $expected on disk after deb install"; exit 1; }
+          done
+
+      - name: Verify rpm package in fedora:latest
+        shell: bash
+        env:
+          PKG_VERSION: ${{ steps.meta.outputs.pkg_version }}
+          FILE_VERSION: ${{ steps.meta.outputs.file_version }}
+        run: |
+          rpm_name="mkv-anime-batch-slint-${FILE_VERSION}-1.x86_64.rpm"
+          docker run --rm -i \
+            -v /tmp/slint-prerelease:/dist:ro \
+            -e "RPM_NAME=$rpm_name" \
+            -e "PKG_VERSION=$PKG_VERSION" \
+            fedora:latest bash -euo pipefail <<'EOF'
+          rpm_ver="$(rpm -qp --qf '%{VERSION}\n' "/dist/$RPM_NAME")"
+          if [ "$rpm_ver" != "$PKG_VERSION" ]; then
+            echo "::error::RPM Version is '$rpm_ver', expected '$PKG_VERSION'"
+            exit 1
+          fi
+
+          reqs="$(rpm -qpR "/dist/$RPM_NAME")"
+          echo "Requires:"
+          echo "$reqs"
+          sonames=(
+            libEGL.so.1
+            libGL.so.1
+            libwayland-client.so.0
+            libwayland-egl.so.1
+            libX11.so.6
+            libX11-xcb.so.1
+            libxcb.so.1
+            libXcursor.so.1
+            libXi.so.6
+            libxkbcommon.so.0
+            libxkbcommon-x11.so.0
+          )
+          for soname in "${sonames[@]}"; do
+            grep -Fxq "${soname}()(64bit)" <<< "$reqs" || { echo "::error::RPM Requires missing ${soname}()(64bit)"; exit 1; }
+          done
+
+          dnf install -y "/dist/$RPM_NAME"
+
+          ldconfig_libs="$(ldconfig -p | awk 'NR > 1 { print $1 }')"
+          for soname in "${sonames[@]}"; do
+            grep -Fxq "$soname" <<< "$ldconfig_libs" || { echo "::error::ldconfig -p missing $soname after RPM install"; exit 1; }
+          done
+
+          ldd_out="$(ldd /usr/bin/mkv-anime-batch-slint)"
+          echo "$ldd_out"
+          if grep -q "not found" <<< "$ldd_out"; then
+            echo "::error::missing shared library in RPM install"
+            exit 1
+          fi
+
+          test -x /usr/bin/mkv-anime-batch-slint
+          files="$(rpm -ql mkv-anime-batch-slint)"
+          echo "$files"
+          for expected in \
+            /usr/bin/mkv-anime-batch-slint \
+            /usr/share/applications/mkv-anime-batch-slint.desktop \
+            /usr/share/icons/hicolor/32x32/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/128x128/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/256x256/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/512x512/apps/mkv-anime-batch-slint.png \
+            /usr/share/icons/hicolor/scalable/apps/mkv-anime-batch-slint.svg \
+            /usr/share/licenses/mkv-anime-batch-slint/LICENSE \
+            /usr/share/licenses/mkv-anime-batch-slint/OFL-JetBrainsMono.txt \
+            /usr/share/licenses/mkv-anime-batch-slint/OFL-Onest.txt \
+            /usr/share/licenses/mkv-anime-batch-slint/OFL-Unbounded.txt; do
+            grep -Fxq "$expected" <<< "$files" || { echo "::error::missing $expected in RPM package list"; exit 1; }
+            test -f "$expected" || { echo "::error::missing $expected on disk after RPM install"; exit 1; }
+          done
+          EOF
+
+      - name: Verify AppImage contents
+        shell: bash
+        env:
+          FILE_VERSION: ${{ steps.meta.outputs.file_version }}
+        run: |
+          appimage="/tmp/slint-prerelease/mkv-anime-batch-slint-${FILE_VERSION}-x86_64.AppImage"
+          extract_dir="$(mktemp -d)"
+          trap 'rm -rf "$extract_dir"' EXIT
+          (cd "$extract_dir" && "$appimage" --appimage-extract > /dev/null)
+
+          root="$extract_dir/squashfs-root"
+          test -x "$root/AppRun"
+          test -x "$root/usr/bin/mkv-anime-batch-slint"
+          for expected in \
+            mkv-anime-batch-slint.desktop \
+            mkv-anime-batch-slint.png \
+            usr/share/applications/mkv-anime-batch-slint.desktop \
+            usr/share/icons/hicolor/32x32/apps/mkv-anime-batch-slint.png \
+            usr/share/icons/hicolor/128x128/apps/mkv-anime-batch-slint.png \
+            usr/share/icons/hicolor/256x256/apps/mkv-anime-batch-slint.png \
+            usr/share/icons/hicolor/512x512/apps/mkv-anime-batch-slint.png \
+            usr/share/icons/hicolor/scalable/apps/mkv-anime-batch-slint.svg \
+            usr/share/doc/mkv-anime-batch-slint/LICENSE \
+            usr/share/doc/mkv-anime-batch-slint/OFL-JetBrainsMono.txt \
+            usr/share/doc/mkv-anime-batch-slint/OFL-Onest.txt \
+            usr/share/doc/mkv-anime-batch-slint/OFL-Unbounded.txt; do
+            test -f "$root/$expected" || { echo "::error::missing $expected in AppImage"; exit 1; }
+          done
+
+          # AppRun must run the binary beside it, not one under an inherited APPDIR.
+          # It passes the environment and arguments on untouched.
+          cat > "$root/usr/bin/mkv-anime-batch-slint" <<'STUB'
+          #!/bin/sh
+          echo "APPRUN-OK $APPDIR $*"
+          STUB
+          APPDIR=/nonexistent "$root/AppRun" a b | grep -Fxq "APPRUN-OK /nonexistent a b" || {
+            echo "::error::AppRun did not run its own binary with the environment and arguments unchanged"
+            exit 1
+          }
+
+          bundled_libs="$(find "$root" -name '*.so*' -print)"
+          if [ -n "$bundled_libs" ]; then
+            echo "::error::AppImage must not bundle shared libraries, found: $bundled_libs"
+            exit 1
+          fi
+
+      - name: Upload Slint pre-release packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: slint-prerelease-linux
+          path: /tmp/slint-prerelease/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Publish GitHub pre-release (manual dispatch with publish=true only)
+  # ────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish Pre-release
+    needs: [build]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate tracking issue and check for existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          TRACKING_ISSUE: ${{ inputs.tracking_issue }}
+        run: |
+          if [[ ! "$TRACKING_ISSUE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::tracking_issue must be a positive issue number when publish is true"
+            exit 1
+          fi
+
+          issue_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/$TRACKING_ISSUE")" || {
+            echo "::error::could not read tracking issue #$TRACKING_ISSUE"
+            exit 1
+          }
+          is_pr="$(jq -r 'has("pull_request")' <<< "$issue_json")"
+          if [ "$is_pr" != "false" ]; then
+            echo "::error::tracking_issue #$TRACKING_ISSUE is a pull request, not an issue"
+            exit 1
+          fi
+          issue_state="$(jq -r '.state // ""' <<< "$issue_json")"
+          if [ "$issue_state" != "open" ]; then
+            echo "::error::tracking_issue #$TRACKING_ISSUE is '$issue_state', must be 'open'"
+            exit 1
+          fi
+
+          release_tags="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')" || {
+            echo "::error::could not list existing releases"
+            exit 1
+          }
+          if grep -Fxq "$RELEASE_TAG" <<< "$release_tags"; then
+            echo "::error::release $RELEASE_TAG already exists (draft or published); delete a stale draft or pick a new preview number N"
+            exit 1
+          fi
+
+      - name: Download Slint pre-release packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: slint-prerelease-linux
+          path: prerelease
+
+      - name: Build pre-release body
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          TRACKING_ISSUE: ${{ inputs.tracking_issue }}
+        run: |
+          scripts/release-body.sh prerelease-page "$RELEASE_TAG" prerelease > "$RUNNER_TEMP/prerelease-body.md"
+
+      - name: Create or verify release tag at built commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          if ! create_err="$(gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" \
+              -f "sha=$GITHUB_SHA" 2>&1)"; then
+            if [[ "$create_err" != *"Reference already exists"* ]]; then
+              echo "::error::could not create tag $RELEASE_TAG: $create_err"
+              exit 1
+            fi
+
+            ref_json="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+            obj_type="$(jq -r '.object.type // ""' <<< "$ref_json")"
+            obj_sha="$(jq -r '.object.sha // ""' <<< "$ref_json")"
+            depth=0
+            while [ "$obj_type" = "tag" ]; do
+              depth=$((depth + 1))
+              if [ "$depth" -gt 10 ]; then
+                echo "::error::tag $RELEASE_TAG has too many nested tag objects"
+                exit 1
+              fi
+              tag_json="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$obj_sha")"
+              obj_type="$(jq -r '.object.type // ""' <<< "$tag_json")"
+              obj_sha="$(jq -r '.object.sha // ""' <<< "$tag_json")"
+            done
+            if [ "$obj_type" != "commit" ] || [ "$obj_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $RELEASE_TAG points at $obj_sha ($obj_type), not at the built commit $GITHUB_SHA"
+              exit 1
+            fi
+          fi
+
+      - name: Upload draft pre-release
+        id: release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: "MKV Anime Batch Slint preview ${{ needs.build.outputs.preview }}"
+          body_path: ${{ runner.temp }}/prerelease-body.md
+          files: prerelease/*
+          fail_on_unmatched_files: true
+          draft: true
+          prerelease: true
+
+      - name: Publish pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false > /dev/null

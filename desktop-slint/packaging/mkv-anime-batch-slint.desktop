@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=MKV Anime Batch (Slint preview)
+GenericName=Anime batch remuxer
+Comment=Batch remux and extract MKV anime releases
+Exec=mkv-anime-batch-slint
+Icon=mkv-anime-batch-slint
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=mkv;anime;subtitles;fonts;remux;
+StartupNotify=true
+StartupWMClass=mkv-anime-batch-slint

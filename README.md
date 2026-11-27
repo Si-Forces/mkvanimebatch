@@ -3,6 +3,7 @@
 [![CI](https://github.com/Si-Forces/mkvanimebatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Si-Forces/mkvanimebatch/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app/)
+<a href="https://slint.dev"><img alt="Made with Slint" src="https://raw.githubusercontent.com/slint-ui/slint/v1.19.0/logo/MadeWithSlint-logo-whitebg.png" height="20"></a>
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](https://github.com/Si-Forces/mkvanimebatch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -340,3 +341,5 @@ Design documents:
 ## License
 
 [MIT](LICENSE).
+
+The Slint desktop app is built with [Slint](https://slint.dev/), used under the [Slint Royalty-free 2.0 license](https://github.com/slint-ui/slint/blob/v1.19.0/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md).

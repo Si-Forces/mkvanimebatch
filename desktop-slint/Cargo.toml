@@ -66,3 +66,55 @@ i-slint-core = { workspace = true }
 [[bench]]
 name = "queue_scroll"
 harness = false
+
+# Linux packaging metadata (ADR-0017 decision 7 & 2026-11-27 amendment).
+# The binary dlopens EGL/GL, Wayland, X11/xcb/Xcursor/Xi and xkbcommon at runtime, so automatic
+# shlib/ELF discovery misses them; both packages declare them explicitly (Vulkan is omitted).
+[package.metadata.deb]
+name = "mkv-anime-batch-slint"
+section = "video"
+priority = "optional"
+license-file = ["../LICENSE", "0"]
+depends = "$auto, libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0"
+assets = [
+    ["target/release/mkv-anime-batch-slint", "usr/bin/", "755"],
+    ["packaging/mkv-anime-batch-slint.desktop", "usr/share/applications/", "644"],
+    ["icons/32x32.png", "usr/share/icons/hicolor/32x32/apps/mkv-anime-batch-slint.png", "644"],
+    ["icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/mkv-anime-batch-slint.png", "644"],
+    ["icons/128x128@2x.png", "usr/share/icons/hicolor/256x256/apps/mkv-anime-batch-slint.png", "644"],
+    ["icons/icon.png", "usr/share/icons/hicolor/512x512/apps/mkv-anime-batch-slint.png", "644"],
+    ["icons/icon.svg", "usr/share/icons/hicolor/scalable/apps/mkv-anime-batch-slint.svg", "644"],
+    ["ui/fonts/OFL-JetBrainsMono.txt", "usr/share/doc/mkv-anime-batch-slint/", "644"],
+    ["ui/fonts/OFL-Onest.txt", "usr/share/doc/mkv-anime-batch-slint/", "644"],
+    ["ui/fonts/OFL-Unbounded.txt", "usr/share/doc/mkv-anime-batch-slint/", "644"],
+    ["../LICENSE", "usr/share/doc/mkv-anime-batch-slint/", "644"],
+]
+
+[package.metadata.generate-rpm]
+release = "1"
+assets = [
+    { source = "target/release/mkv-anime-batch-slint", dest = "/usr/bin/mkv-anime-batch-slint", mode = "755" },
+    { source = "packaging/mkv-anime-batch-slint.desktop", dest = "/usr/share/applications/mkv-anime-batch-slint.desktop", mode = "644" },
+    { source = "icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/mkv-anime-batch-slint.png", mode = "644" },
+    { source = "icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/mkv-anime-batch-slint.png", mode = "644" },
+    { source = "icons/128x128@2x.png", dest = "/usr/share/icons/hicolor/256x256/apps/mkv-anime-batch-slint.png", mode = "644" },
+    { source = "icons/icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/mkv-anime-batch-slint.png", mode = "644" },
+    { source = "icons/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/mkv-anime-batch-slint.svg", mode = "644" },
+    { source = "ui/fonts/OFL-JetBrainsMono.txt", dest = "/usr/share/licenses/mkv-anime-batch-slint/OFL-JetBrainsMono.txt", mode = "644" },
+    { source = "ui/fonts/OFL-Onest.txt", dest = "/usr/share/licenses/mkv-anime-batch-slint/OFL-Onest.txt", mode = "644" },
+    { source = "ui/fonts/OFL-Unbounded.txt", dest = "/usr/share/licenses/mkv-anime-batch-slint/OFL-Unbounded.txt", mode = "644" },
+    { source = "../LICENSE", dest = "/usr/share/licenses/mkv-anime-batch-slint/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+"libEGL.so.1()(64bit)" = "*"
+"libGL.so.1()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libX11.so.6()(64bit)" = "*"
+"libX11-xcb.so.1()(64bit)" = "*"
+"libxcb.so.1()(64bit)" = "*"
+"libXcursor.so.1()(64bit)" = "*"
+"libXi.so.6()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"
