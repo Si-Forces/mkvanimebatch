@@ -256,6 +256,9 @@ export component App inherits Window {
     in-out property <bool> sheet-open <=> Focus.sheet-open;
     // The title bar's Appearance menu is open.
     in-out property <bool> appearance-open;
+    // The Appearance menu closed (any way): the host applies an OS reduced-motion reply that came
+    // while it was open.
+    callback appearance-closed();
     // The control that takes the focus back when the sheet closes (a `Focus` key): the gear that
     // opened it, Run after a refused Run, else the one that had the focus.
     property <string> sheet-return;
@@ -371,6 +374,9 @@ export component App inherits Window {
     }
     changed appearance-open => {
         Tip.hide();
+        if !self.appearance-open {
+            root.appearance-closed();
+        }
     }
     changed log-open => {
         Tip.hide();

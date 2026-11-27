@@ -41,6 +41,14 @@ arboard = { version = "3.6", default-features = false }
 # Copy on Wayland without XWayland: declared here, not left to what Slint's backend selects.
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+# XDG Settings portal read for Reduce motion; already in the tree through Slint's winit backend.
+zbus = { version = "5.19", default-features = false, features = ["async-io"] }
+
+[target.'cfg(windows)'.dependencies]
+# Windows registry read for Reduce transparency (`EnableTransparency`).
+winreg = "0.55"
+# Reads the OS motion preference Slint's winit backend already mirrors into `SlintContext`.
+i-slint-core = { workspace = true }
 
 # The Windows exe's icon and version resources (build.rs), as the Tauri host's tauri-build does.
 [build-dependencies]
