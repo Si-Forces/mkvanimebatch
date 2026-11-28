@@ -1178,6 +1178,67 @@ fn the_number_fields_and_the_complexity_show_their_tooltips_on_hover() {
     app.hide().unwrap();
 }
 
+/// A locked text field shows style.css `input:disabled`'s not-allowed cursor and keeps its field's
+/// tooltip; unlocked, it shows the text cursor. A locked button without a tooltip of its own (a
+/// stepper) shows not-allowed too, as `button:disabled`.
+#[test]
+fn a_disabled_text_field_or_button_shows_not_allowed() {
+    use i_slint_core::cursor::MouseCursorInner;
+    use i_slint_core::items::BuiltInMouseCursor;
+    i_slint_backend_testing::init_no_event_loop();
+    let app = new_app();
+    app.window()
+        .set_size(slint::LogicalSize::new(920.0, 1100.0));
+    apply(&app, &ViewState::new(None));
+    app.show().unwrap();
+    app.invoke_open_sheet(Mode::Remux, "".into());
+    frame(&app);
+    let tip = crate::settings::limits().workers_tip;
+    let shown = || ElementHandle::find_by_accessible_label(&app, &tip).count();
+    // In from outside, then the tooltip's show delay; the lock can move the field in the sheet.
+    let hover = |label: &str| {
+        let field = only(&app, label);
+        let (at, size) = (field.absolute_position(), field.size());
+        hover_at(&app, slint::LogicalPosition::new(1.0, 1.0));
+        hover_at(
+            &app,
+            slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0),
+        );
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(2));
+        mouse_cursor(&app)
+    };
+
+    let mut locked = ViewState::new(None);
+    locked.busy = true;
+    apply(&app, &locked);
+    frame(&app);
+    assert_eq!(
+        hover("Workers"),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "a locked field shows not-allowed"
+    );
+    assert_eq!(shown(), 1, "a locked field keeps its tooltip");
+    assert_eq!(
+        hover("Increase workers"),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::NotAllowed),
+        "a locked stepper shows not-allowed"
+    );
+
+    apply(&app, &ViewState::new(None));
+    frame(&app);
+    assert_eq!(
+        hover("Workers"),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::Text),
+        "an unlocked field shows the text cursor"
+    );
+    assert_eq!(
+        hover("Increase workers"),
+        MouseCursorInner::BuiltIn(BuiltInMouseCursor::Pointer),
+        "an unlocked stepper shows the pointer"
+    );
+    app.hide().unwrap();
+}
+
 /// Pressing the complexity slider hides the wrapping Field's tooltip immediately (so it does not
 /// cover the track while dragging) and keeps it hidden after release until the pointer leaves and
 /// returns, matching a browser's `title` tooltip.
